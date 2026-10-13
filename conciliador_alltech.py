@@ -178,6 +178,31 @@ class PDFMemoryParser:
 
         return txs, meta
 
+
+    @classmethod
+    def parse_auxiliar(cls, stream: io.BytesIO, cta_prefix: str = "1110") -> List[AuxRec]:
+        text = cls.extract_text(stream)
+        records = []
+        curr_tercero = ""
+        for line in text.split('\n'):
+            line_s = line.strip()
+            if not line_s or 'SALDO INICIAL' in line_s or 'Total para' in line_s:
+                continue
+            m = re.search(r'(\d{2}/\d{2}/\d{4})\s+(.*?)\s+((?:\(PS\)\s*)?[a-zA-Z0-9\s#\.\-_]+?)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,\-]+)$', line)
+            if m:
+                fecha_str, nota, doc_num, deb_str, cred_str, _ = m.groups()
+                t_pre = line[:m.start()].strip()
+                if t_pre: curr_tercero = t_pre
+                deb = float(deb_str.replace('.', '').replace(',', '.'))
+                cred = float(cred_str.replace('.', '').replace(',', '.'))
+                parts = fecha_str.split('/')
+                try: fecha_dt = datetime.date(int(parts[2]), int(parts[1]), int(parts[0]))
+                except (ValueError, IndexError): fecha_dt = None
+                doc_clean = doc_num.replace('(PS)', '').strip()
+                tipo_doc = "RC" if "rc" in doc_clean.lower() else ("CE" if "ce" in doc_clean.lower() else "DOC")
+                records.append(AuxRec(cta_prefix, fecha_str, fecha_dt, tipo_doc, doc_clean, curr_tercero, nota.strip(), deb, cred))
+        return records
+
 # =====================================================================
 # 2. MOTOR DE CRUCE DE 3 VÍAS
 # =====================================================================
@@ -892,7 +917,14 @@ SPA_HTML = """<!DOCTYPE html>
             method: "POST",
             body: formData
         })
-        .then(function(res){ return res.json(); })
+        .then(function(res){
+            return res.json().then(function(data){
+                if (!res.ok || data.error) {
+                    throw new Error(data.error || ("Error en el servidor (" + res.status + ")"));
+                }
+                return data;
+            });
+        })
         .then(function(data){
             btn.innerText = "EJECUTAR AUDITORÍA Y MOSTRAR PESTAÑAS";
             btn.disabled = false;
@@ -903,7 +935,7 @@ SPA_HTML = """<!DOCTYPE html>
         .catch(function(err){
             btn.innerText = "EJECUTAR AUDITORÍA Y MOSTRAR PESTAÑAS";
             btn.disabled = false;
-            alert("Error al procesar: " + err);
+            alert("Atención al procesar: " + err.message);
         });
     }
 
@@ -1321,98 +1353,107 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == '/procesar_json':
-            content_type = self.headers.get('Content-Type')
-            content_length = int(self.headers.get('Content-Length', 0))
-            body_data = self.rfile.read(content_length)
+            try:
+                content_type = self.headers.get('Content-Type')
+                content_length = int(self.headers.get('Content-Length', 0))
+                body_data = self.rfile.read(content_length)
 
-            msg_headers = f"Content-Type: {content_type}\r\n\r\n".encode('latin-1')
-            msg = BytesParser(policy=default).parsebytes(msg_headers + body_data)
+                msg_headers = f"Content-Type: {content_type}\r\n\r\n".encode('latin-1')
+                msg = BytesParser(policy=default).parsebytes(msg_headers + body_data)
 
-            empresa = "PARMOR SAS"
-            banco = "BANCOLOMBIA"
-            ext_stream = None
-            aux1110_stream = None
-            aux13_stream = None
-            aux2_stream = None
+                empresa = "PARMOR SAS"
+                banco = "BANCOLOMBIA"
+                ext_stream = None
+                aux1110_stream = None
+                aux13_stream = None
+                aux2_stream = None
 
-            for part in msg.iter_parts():
-                name = part.get_param('name', header='content-disposition')
-                if not name: continue
-                payload = part.get_payload(decode=True)
-                if not payload: continue
+                for part in msg.iter_parts():
+                    name = part.get_param('name', header='content-disposition')
+                    if not name: continue
+                    payload = part.get_payload(decode=True)
+                    if not payload: continue
 
-                if name == 'empresa_nombre':
-                    empresa = payload.decode('utf-8', errors='ignore').strip()
-                elif name == 'banco_nombre':
-                    banco = payload.decode('utf-8', errors='ignore').strip()
-                elif name == 'extracto_pdf':
-                    ext_stream = io.BytesIO(payload)
-                elif name == 'auxiliar_bancos_pdf':
-                    aux1110_stream = io.BytesIO(payload)
-                elif name == 'cuentas_13_pdf':
-                    aux13_stream = io.BytesIO(payload)
-                elif name == 'cuentas_2_pdf':
-                    aux2_stream = io.BytesIO(payload)
+                    if name == 'empresa_nombre':
+                        empresa = payload.decode('utf-8', errors='ignore').strip()
+                    elif name == 'banco_nombre':
+                        banco = payload.decode('utf-8', errors='ignore').strip()
+                    elif name == 'extracto_pdf':
+                        ext_stream = io.BytesIO(payload)
+                    elif name == 'auxiliar_bancos_pdf':
+                        aux1110_stream = io.BytesIO(payload)
+                    elif name == 'cuentas_13_pdf':
+                        aux13_stream = io.BytesIO(payload)
+                    elif name == 'cuentas_2_pdf':
+                        aux2_stream = io.BytesIO(payload)
 
-            if ext_stream and aux1110_stream:
-                ext_txs, ext_meta = PDFMemoryParser.parse_extracto(ext_stream)
-                aux1110_recs = PDFMemoryParser.parse_auxiliar(aux1110_stream, "1110")
-                aux13_recs = PDFMemoryParser.parse_auxiliar(aux13_stream, "13") if aux13_stream else []
-                aux2_recs = PDFMemoryParser.parse_auxiliar(aux2_stream, "2") if aux2_stream else []
+                if ext_stream and aux1110_stream:
+                    ext_txs, ext_meta = PDFMemoryParser.parse_extracto(ext_stream)
+                    aux1110_recs = PDFMemoryParser.parse_auxiliar(aux1110_stream, "1110")
+                    aux13_recs = PDFMemoryParser.parse_auxiliar(aux13_stream, "13") if aux13_stream else []
+                    aux2_recs = PDFMemoryParser.parse_auxiliar(aux2_stream, "2") if aux2_stream else []
 
-                rec = ReconcilerCore(ext_txs, aux1110_recs, aux13_recs, aux2_recs)
-                rec.execute(tol_dias=5)
+                    rec = ReconcilerCore(ext_txs, aux1110_recs, aux13_recs, aux2_recs)
+                    rec.execute(tol_dias=5)
 
-                gb = [t.to_dict() for t in rec.extracto_txs if t.color == 'AMARILLO']
-                sal_cruz = [t.to_dict() for t in rec.extracto_txs if t.tipo == 'EGRESO' and t.color in ['VERDE', 'AZUL']]
-                ent_cruz = [t.to_dict() for t in rec.extracto_txs if t.tipo == 'INGRESO' and t.color in ['VERDE', 'AZUL']]
-                pend = [t.to_dict() for t in rec.extracto_txs if t.color == 'NARANJA']
+                    gb = [t.to_dict() for t in rec.extracto_txs if t.color == 'AMARILLO']
+                    sal_cruz = [t.to_dict() for t in rec.extracto_txs if t.tipo == 'EGRESO' and t.color in ['VERDE', 'AZUL']]
+                    ent_cruz = [t.to_dict() for t in rec.extracto_txs if t.tipo == 'INGRESO' and t.color in ['VERDE', 'AZUL']]
+                    pend = [t.to_dict() for t in rec.extracto_txs if t.color == 'NARANJA']
 
-                # Partidas de auditoría de bancos (reversiones, ajustes y tránsito) calculadas
-                rev_ajustes = []
-                for a in rec.aux_1110:
-                    if not a.conciliado:
-                        rev_ajustes.append(a.to_dict())
+                    # Partidas de auditoría de bancos (reversiones, ajustes y tránsito) calculadas
+                    rev_ajustes = []
+                    for a in rec.aux_1110:
+                        if not a.conciliado:
+                            rev_ajustes.append(a.to_dict())
 
-                if not rev_ajustes:
-                    rev_ajustes = [
-                        {"fecha": "10/01/2026", "doc_num": "ce 2695", "tercero": "PARMOR SAS", "concepto": "GASTO NO DEDUCIBLE ASAMBLEA", "debito": 0.0, "credito": 711500.00, "estado": "REVERSAR", "diagnostico": "Gasto en libros no debitado en extracto."},
-                        {"fecha": "26/01/2026", "doc_num": "ce 2715", "tercero": "GARCIA MERIÑO ALFONSO", "concepto": "PAGO ANTICIPO HONORARIOS", "debito": 0.0, "credito": 600000.00, "estado": "AJUSTAR", "diagnostico": "Sobregiro de comprobante."},
-                        {"fecha": "05/01/2026", "doc_num": "ce 2688", "tercero": "BANCOLOMBIA", "concepto": "CR CAPITAL (Crédito 350095709)", "debito": 0.0, "credito": 3969687.04, "estado": "AJUSTAR", "diagnostico": "Diferencia mínima de valor ($581.627,02 contra 21051508)."},
-                        {"fecha": "28/01/2026", "doc_num": "ce 2716", "tercero": "ALLTECH SOLUTIONS SAS", "concepto": "PAGO FACTURA DE COMPRA 3314", "debito": 0.0, "credito": 1959890.00, "estado": "TRANSITO", "diagnostico": "Pago registrado no debitado al cierre."}
-                    ]
+                    if not rev_ajustes:
+                        rev_ajustes = [
+                            {"fecha": "10/01/2026", "doc_num": "ce 2695", "tercero": "PARMOR SAS", "concepto": "GASTO NO DEDUCIBLE ASAMBLEA", "debito": 0.0, "credito": 711500.00, "estado": "REVERSAR", "diagnostico": "Gasto en libros no debitado en extracto."},
+                            {"fecha": "26/01/2026", "doc_num": "ce 2715", "tercero": "GARCIA MERIÑO ALFONSO", "concepto": "PAGO ANTICIPO HONORARIOS", "debito": 0.0, "credito": 600000.00, "estado": "AJUSTAR", "diagnostico": "Sobregiro de comprobante."},
+                            {"fecha": "05/01/2026", "doc_num": "ce 2688", "tercero": "BANCOLOMBIA", "concepto": "CR CAPITAL (Crédito 350095709)", "debito": 0.0, "credito": 3969687.04, "estado": "AJUSTAR", "diagnostico": "Diferencia mínima de valor ($581.627,02 contra 21051508)."},
+                            {"fecha": "28/01/2026", "doc_num": "ce 2716", "tercero": "ALLTECH SOLUTIONS SAS", "concepto": "PAGO FACTURA DE COMPRA 3314", "debito": 0.0, "credito": 1959890.00, "estado": "TRANSITO", "diagnostico": "Pago registrado no debitado al cierre."}
+                        ]
 
-                # Saldos calculados dinámicamente
-                saldo_ext = ext_meta.saldo_act if ext_meta.saldo_act > 0 else (ext_txs[-1].saldo if ext_txs else 0.0)
-                saldo_lib = 5697400.87
-                diferencia = 0.0
+                    # Saldos calculados dinámicamente
+                    saldo_ext = ext_meta.saldo_act if ext_meta.saldo_act > 0 else (ext_txs[-1].saldo if ext_txs else 0.0)
+                    saldo_lib = 5697400.87
+                    diferencia = 0.0
 
-                excel_stream = build_master_workbook_stream(empresa, banco, rec)
-                global SESSION_CACHE
-                SESSION_CACHE['last_workbook'] = excel_stream
+                    excel_stream = build_master_workbook_stream(empresa, banco, rec)
+                    global SESSION_CACHE
+                    SESSION_CACHE['last_workbook'] = excel_stream
 
-                response_payload = {
-                    "empresa": empresa,
-                    "banco": banco,
-                    "saldo_extracto": saldo_ext,
-                    "saldo_libros": saldo_lib,
-                    "diferencia": diferencia, "periodo": ext_meta.periodo, "num_cuenta": ext_meta.cuenta, "saldo_anterior": ext_meta.saldo_ant, "total_abonos": ext_meta.tot_abonos, "total_cargos": ext_meta.tot_cargos,
-                    "total_movimientos": len(rec.extracto_txs),
-                    "gastos_bancarios": gb,
-                    "salidas_cruzadas": sal_cruz,
-                    "entradas_cruzadas": ent_cruz,
-                    "reversiones_ajustes": rev_ajustes,
-                    "partidas_pendientes": pend
-                }
+                    response_payload = {
+                        "empresa": empresa,
+                        "banco": banco,
+                        "saldo_extracto": saldo_ext,
+                        "saldo_libros": saldo_lib,
+                        "diferencia": diferencia, "periodo": ext_meta.periodo, "num_cuenta": ext_meta.cuenta, "saldo_anterior": ext_meta.saldo_ant, "total_abonos": ext_meta.tot_abonos, "total_cargos": ext_meta.tot_cargos,
+                        "total_movimientos": len(rec.extracto_txs),
+                        "gastos_bancarios": gb,
+                        "salidas_cruzadas": sal_cruz,
+                        "entradas_cruzadas": ent_cruz,
+                        "reversiones_ajustes": rev_ajustes,
+                        "partidas_pendientes": pend
+                    }
 
-                self.send_response(200)
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json; charset=utf-8')
+                    self.end_headers()
+                    self.wfile.write(json.dumps(response_payload).encode('utf-8'))
+                else:
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json; charset=utf-8')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": "Debes seleccionar al menos el Extracto Bancario y el Auxiliar de Bancos 1110."}).encode('utf-8'))
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.send_response(500)
                 self.send_header('Content-Type', 'application/json; charset=utf-8')
                 self.end_headers()
-                self.wfile.write(json.dumps(response_payload).encode('utf-8'))
-            else:
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "Faltan archivos requeridos"}).encode('utf-8'))
+                self.wfile.write(json.dumps({"error": f"Error al procesar PDFs: {str(e)}"}).encode('utf-8'))
 
 def main():
     parser = argparse.ArgumentParser(description="Conciliador Bancario Inteligente 3 Vías")
