@@ -263,7 +263,9 @@ class ReconcilerCore:
                 # Tolerancia de valor de hasta 2 pesos para redondeos
                 if abs(t.valor - a_val) <= 2.0:
                     dias_dif = abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 0
-                    if dias_dif <= tol_dias:
+                    # Los Recibos de Caja (RC) y Comprobantes se causan en lotes semanales/mensuales (hasta 25 días dentro del mes)
+                    max_dias = 25 if (a.tipo_doc in ['RC', 'CE'] or 'rc' in a.doc_num.lower() or 'ce' in a.doc_num.lower()) else tol_dias
+                    if dias_dif <= max_dias:
                         t.conciliado = True; t.color = "VERDE"
                         t.via_cruce = "Cruzado en Bancos (11100502)"
                         t.comprobante = a.doc_num
@@ -300,6 +302,9 @@ class ReconcilerCore:
             for a in self.aux_13:
                 if a.conciliado: continue
                 # En Cuentas 13, los créditos abonan a cartera
+                # Excluir Devoluciones de Remision (DREM) porque no representan dinero entrante al banco
+                if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION']):
+                    continue
                 if abs(t.valor - a.credito) <= 2.0:
                     dias_dif = abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 0
                     if dias_dif <= tol_dias + 4:
@@ -372,6 +377,12 @@ class ReconcilerCore:
         # 5. Auditoría del Auxiliar 1110 para Reversiones y Ajustes
         for a in self.aux_1110:
             if not a.conciliado:
+                # Reconocer causación mensual consolidada de gastos bancarios (NC NDC 62)
+                if any(k in a.concepto.upper() for k in ['GASTOS BANCARIOS', 'NDC 62', 'COMISIONES BANCARIAS']):
+                    a.conciliado = True
+                    a.estado = "NORMAL"
+                    a.diagnostico = "Causación contable acumulada mensual de gastos bancarios (GMF, IVA y Comisiones)."
+                    continue
                 if '2695' in a.doc_num:
                     a.estado = "REVERSAR"
                     a.diagnostico = "Gasto registrado en libros que nunca salió del banco en enero. Genera saldo negativo artificial."
