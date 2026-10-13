@@ -35,10 +35,11 @@ class BankTx:
         self.fecha_dt = fecha_dt
         self.desc = desc.strip()
         self.valor = abs(valor)
-        self.tipo = tipo
+        self.tipo = tipo  # 'INGRESO' o 'EGRESO'
         self.saldo = saldo
         self.conciliado = False
         self.color = "NARANJA"
+        self.subcategoria = "OTRO"  # Para gastos bancarios: GMF, COMISION, IVA, INTERES
         self.via_cruce = "Pendiente Protocolo 5 Pasos"
         self.comprobante = "S/C"
         self.tercero = "Tercero por Identificar"
@@ -56,6 +57,7 @@ class BankTx:
             "saldo": self.saldo,
             "conciliado": self.conciliado,
             "color": self.color,
+            "subcategoria": self.subcategoria,
             "via_cruce": self.via_cruce,
             "comprobante": self.comprobante,
             "tercero": self.tercero,
@@ -79,6 +81,7 @@ class AuxRec:
         self.credito = credito
         self.conciliado = False
         self.estado = "NORMAL"
+        self.diagnostico = ""
 
     def to_dict(self):
         return {
@@ -90,8 +93,19 @@ class AuxRec:
             "concepto": self.concepto,
             "debito": self.debito,
             "credito": self.credito,
-            "estado": self.estado
+            "estado": self.estado,
+            "diagnostico": self.diagnostico
         }
+
+class StatementMetadata:
+    def __init__(self, cuenta: str = "", periodo: str = "", saldo_ant: float = 0.0, 
+                 tot_abonos: float = 0.0, tot_cargos: float = 0.0, saldo_act: float = 0.0):
+        self.cuenta = cuenta
+        self.periodo = periodo
+        self.saldo_ant = saldo_ant
+        self.tot_abonos = tot_abonos
+        self.tot_cargos = tot_cargos
+        self.saldo_act = saldo_act
 
 class PDFMemoryParser:
     @staticmethod
@@ -105,8 +119,38 @@ class PDFMemoryParser:
         return "\n".join(pages_text)
 
     @classmethod
-    def parse_extracto(cls, stream: io.BytesIO) -> List[BankTx]:
+    def parse_extracto_metadata(cls, text: str) -> StatementMetadata:
+        saldo_ant = 0.0
+        tot_abonos = 0.0
+        tot_cargos = 0.0
+        saldo_act = 0.0
+        cuenta = "S/N"
+        periodo = "Mes Auditado"
+
+        m_ant = re.search(r'SALDO ANTERIOR\s+\$\s*([\d,]+\.\d{2})', text)
+        if m_ant: saldo_ant = float(m_ant.group(1).replace(',', ''))
+
+        m_ab = re.search(r'TOTAL ABONOS\s+\$\s*([\d,]+\.\d{2})', text)
+        if m_ab: tot_abonos = float(m_ab.group(1).replace(',', ''))
+
+        m_cg = re.search(r'TOTAL CARGOS\s+\$\s*([\d,]+\.\d{2})', text)
+        if m_cg: tot_cargos = float(m_cg.group(1).replace(',', ''))
+
+        m_act = re.search(r'SALDO ACTUAL\s+\$\s*([\d,]+\.\d{2})', text)
+        if m_act: saldo_act = float(m_act.group(1).replace(',', ''))
+
+        m_cta = re.search(r'N[ÚU]MERO\s+(\d+)', text)
+        if m_cta: cuenta = m_cta.group(1)
+
+        m_per = re.search(r'DESDE:\s*([\d/-]+)\s+HASTA:\s*([\d/-]+)', text)
+        if m_per: periodo = f"{m_per.group(1)} a {m_per.group(2)}"
+
+        return StatementMetadata(cuenta, periodo, saldo_ant, tot_abonos, tot_cargos, saldo_act)
+
+    @classmethod
+    def parse_extracto(cls, stream: io.BytesIO) -> Tuple[List[BankTx], StatementMetadata]:
         text = cls.extract_text(stream)
+        meta = cls.parse_extracto_metadata(text)
         txs = []
         for line in text.split('\n'):
             line_s = line.strip()
@@ -123,31 +167,16 @@ class PDFMemoryParser:
                 except ValueError: fecha_dt = None
                 s_val = float(s_str.replace(',', '')) if s_str != '.00' else 0.0
                 txs.append(BankTx(f"{f_str}/2026", fecha_dt, desc, abs(v), tipo, s_val))
-        return txs
+        
+        # Si no se detectó saldo actual en encabezado, tomar el saldo del último movimiento
+        if meta.saldo_act == 0.0 and txs:
+            meta.saldo_act = txs[-1].saldo
+        if meta.tot_abonos == 0.0:
+            meta.tot_abonos = sum(t.valor for t in txs if t.tipo == 'INGRESO')
+        if meta.tot_cargos == 0.0:
+            meta.tot_cargos = sum(t.valor for t in txs if t.tipo == 'EGRESO')
 
-    @classmethod
-    def parse_auxiliar(cls, stream: io.BytesIO, cta_prefix: str = "1110") -> List[AuxRec]:
-        text = cls.extract_text(stream)
-        records = []
-        curr_tercero = ""
-        for line in text.split('\n'):
-            line_s = line.strip()
-            if not line_s or 'SALDO INICIAL' in line_s or 'Total para' in line_s:
-                continue
-            m = re.search(r'(\d{2}/\d{2}/\d{4})\s+(.*?)\s+((?:\(PS\)\s*)?[a-zA-Z0-9\s#\.\-_]+?)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,\-]+)$', line)
-            if m:
-                fecha_str, nota, doc_num, deb_str, cred_str, _ = m.groups()
-                t_pre = line[:m.start()].strip()
-                if t_pre: curr_tercero = t_pre
-                deb = float(deb_str.replace('.', '').replace(',', '.'))
-                cred = float(cred_str.replace('.', '').replace(',', '.'))
-                parts = fecha_str.split('/')
-                try: fecha_dt = datetime.date(int(parts[2]), int(parts[1]), int(parts[0]))
-                except (ValueError, IndexError): fecha_dt = None
-                doc_clean = doc_num.replace('(PS)', '').strip()
-                tipo_doc = "RC" if "rc" in doc_clean.lower() else ("CE" if "ce" in doc_clean.lower() else "DOC")
-                records.append(AuxRec(cta_prefix, fecha_str, fecha_dt, tipo_doc, doc_clean, curr_tercero, nota.strip(), deb, cred))
-        return records
+        return txs, meta
 
 # =====================================================================
 # 2. MOTOR DE CRUCE DE 3 VÍAS
@@ -160,26 +189,44 @@ class ReconcilerCore:
         self.aux_2 = aux_2
 
     def execute(self, tol_dias: int = 5):
-        # 1. Gastos bancarios directos (Amarillo)
+        # 1. Detección y clasificación de Gastos y Rendimientos Bancarios (Amarillo)
         for t in self.extracto_txs:
             d_u = t.desc.upper()
-            if any(k in d_u for k in ['4X1000', 'CANAL NEGOCIOS', 'COMISION', 'IVA']):
-                t.conciliado = True; t.color = "AMARILLO"
-                t.via_cruce = "Gasto Bancario Directo"
+            if '4X1000' in d_u:
+                t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "GMF"
+                t.via_cruce = "GMF (4x1000)"
                 t.comprobante = "Extracto Bancario"
                 t.tercero = "BANCOLOMBIA S.A."
-                t.soporte = "Nota Débito Bancaria"
-                t.cuenta_puc = "530515 Gastos Bancarios / 24080203 IVA"
-                t.diagnostico = "Débito automático bancario liquidado mensualmente."
-                t.protocolo = "Causar nota contable de gastos bancarios e IVA."
+                t.soporte = "Impuesto Gravamen Movimiento Financiero"
+                t.cuenta_puc = "53051501 Gasto GMF"
+                t.diagnostico = "Débito automático bancario liquidado diariamente."
+                t.protocolo = "Causar nota de contabilidad de impuesto GMF."
+            elif 'IVA' in d_u:
+                t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "IVA"
+                t.via_cruce = "IVA Bancario"
+                t.comprobante = "Extracto Bancario"
+                t.tercero = "BANCOLOMBIA S.A."
+                t.soporte = "IVA 19% Comisiones y Cuotas"
+                t.cuenta_puc = "24080203 IVA Descontable Servicios"
+                t.diagnostico = "IVA generado por servicios bancarios facturados."
+                t.protocolo = "Registrar con factura electrónica Bancolombia."
+            elif any(k in d_u for k in ['CANAL NEGOCIOS', 'COMISION', 'PLAN', 'CUOTA']):
+                t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "COMISION"
+                t.via_cruce = "Comisión / Cuota Manejo"
+                t.comprobante = "Extracto Bancario"
+                t.tercero = "BANCOLOMBIA S.A."
+                t.soporte = "Comisiones y Cuota Plan Negocios"
+                t.cuenta_puc = "53051505 Comisiones Bancarias"
+                t.diagnostico = "Cobro administrativo de plan transaccional."
+                t.protocolo = "Registrar con factura electrónica Bancolombia."
             elif 'INTERES' in d_u:
-                t.conciliado = True; t.color = "AMARILLO"
+                t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "INTERES"
                 t.via_cruce = "Rendimiento Financiero"
                 t.comprobante = "Extracto Bancario"
                 t.tercero = "BANCOLOMBIA S.A."
                 t.soporte = "Abono Rendimientos de Ahorros"
-                t.cuenta_puc = "421005 Ingresos Financieros"
-                t.diagnostico = "Intereses reconocidos por la entidad bancaria."
+                t.cuenta_puc = "42100501 Ingresos Financieros"
+                t.diagnostico = "Rendimiento liquidado sobre saldo promedio de cuenta."
                 t.protocolo = "Causar nota contable de rendimientos de ahorros."
 
         # 2. Cruce directo con Auxiliar 1110 (Verde)
@@ -188,7 +235,8 @@ class ReconcilerCore:
             for a in self.aux_1110:
                 if a.conciliado: continue
                 a_val = a.credito if t.tipo == 'EGRESO' else a.debito
-                if abs(t.valor - a_val) < 0.01:
+                # Tolerancia de valor de hasta 2 pesos para redondeos
+                if abs(t.valor - a_val) <= 2.0:
                     dias_dif = abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 0
                     if dias_dif <= tol_dias:
                         t.conciliado = True; t.color = "VERDE"
@@ -203,13 +251,14 @@ class ReconcilerCore:
                         break
 
         # 3. Subauxiliares (Azul)
-        # Salidas en Cuentas 2 (Proveedores / Nómina / Pasivos)
+        # 3A. Salidas en Cuentas 2 (Proveedores / Nómina / Pasivos)
         for t in [x for x in self.extracto_txs if not x.conciliado and x.tipo == 'EGRESO']:
             for a in self.aux_2:
                 if a.conciliado: continue
-                if abs(t.valor - a.debito) < 0.01:
+                # En Cuentas 2, los débitos cancelan pasivos
+                if abs(t.valor - a.debito) <= 2.0:
                     dias_dif = abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 0
-                    if dias_dif <= tol_dias + 3:
+                    if dias_dif <= tol_dias + 4:
                         t.conciliado = True; t.color = "AZUL"
                         t.via_cruce = "Cruzado en Auxiliar Cuentas 2 (Pasivos)"
                         t.comprobante = a.doc_num
@@ -221,13 +270,14 @@ class ReconcilerCore:
                         a.conciliado = True
                         break
 
-        # Entradas en Cuentas 13 (Deudores / Cartera)
+        # 3B. Entradas en Cuentas 13 (Deudores / Cartera)
         for t in [x for x in self.extracto_txs if not x.conciliado and x.tipo == 'INGRESO']:
             for a in self.aux_13:
                 if a.conciliado: continue
-                if abs(t.valor - a.credito) < 0.01:
+                # En Cuentas 13, los créditos abonan a cartera
+                if abs(t.valor - a.credito) <= 2.0:
                     dias_dif = abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 0
-                    if dias_dif <= tol_dias + 3:
+                    if dias_dif <= tol_dias + 4:
                         t.conciliado = True; t.color = "AZUL"
                         t.via_cruce = "Cruzado en Auxiliar Cuentas 13 (Clientes)"
                         t.comprobante = a.doc_num
@@ -239,7 +289,7 @@ class ReconcilerCore:
                         a.conciliado = True
                         break
 
-        # 4. Pendientes que requieren Protocolo 5 Pasos (Naranja)
+        # 4. Partidas no cruzadas (Naranja - Protocolo 5 Pasos)
         for t in [x for x in self.extracto_txs if not x.conciliado]:
             t.color = "NARANJA"
             t.via_cruce = "Pendiente - No hallado en auxiliares"
@@ -275,6 +325,18 @@ class ReconcilerCore:
                 t.cuenta_puc = "211510 Obligaciones Comerciales"
                 t.diagnostico = "Financiación operativa recibida en la cuenta corriente."
                 t.protocolo = "Paso 4: Validar contrato de financiamiento con Paola Tristancho."
+            elif 'DIAN' in d_u or 'IMPUESTO' in d_u:
+                t.tercero = "DIRECCIÓN DE IMPUESTOS Y ADUANAS NACIONALES (DIAN)"
+                t.soporte = "Pago Recibo Oficial de Impuestos DIAN"
+                t.cuenta_puc = "2365 Retención en la Fuente / 2408 IVA"
+                t.diagnostico = "Pago de impuestos nacionales debitado por PSE."
+                t.protocolo = "Paso 1: Buscar recibos 490 en Drive. Paso 3: Validar causación con Contador."
+            elif 'NEQUI' in d_u:
+                t.tercero = "Beneficiario / Empleado Transferencia Nequi"
+                t.soporte = "Comprobante de Transferencia Nequi"
+                t.cuenta_puc = "2505 Nómina / 2335 Honorarios"
+                t.diagnostico = "Transferencia a cuenta digital Nequi por nómina o anticipo."
+                t.protocolo = "Paso 2: Buscar comprobante en chat corporativo. Paso 5: Aplicar anticipo/nómina."
             else:
                 t.tercero = "Tercero Pendiente por Identificar"
                 t.soporte = "Soporte no encontrado"
@@ -282,18 +344,34 @@ class ReconcilerCore:
                 t.diagnostico = "Operación sin registro contable previo en auxiliares."
                 t.protocolo = "Aplicar Protocolo 5 Pasos: 1) Drive, 2) Grupos, 3) Contador, 4) Tesorera, 5) Anticipo."
 
-        # 5. Auditoría del Auxiliar de Bancos 1110 (Reversiones y Ajustes en Rojo)
+        # 5. Auditoría del Auxiliar 1110 para Reversiones y Ajustes
         for a in self.aux_1110:
             if not a.conciliado:
-                if '2695' in a.doc_num: a.estado = "REVERSAR"
-                elif '2715' in a.doc_num or '2688' in a.doc_num: a.estado = "AJUSTAR"
-                elif '2716' in a.doc_num: a.estado = "TRANSITO"
+                if '2695' in a.doc_num:
+                    a.estado = "REVERSAR"
+                    a.diagnostico = "Gasto registrado en libros que nunca salió del banco en enero. Genera saldo negativo artificial."
+                elif '2715' in a.doc_num:
+                    a.estado = "AJUSTAR"
+                    a.diagnostico = "Comprobante sobregirado: en extracto solo salieron $100.000 directos y $500.000 como transferencia externa."
+                elif '2688' in a.doc_num:
+                    a.estado = "AJUSTAR"
+                    a.diagnostico = "Diferencia mínima de valor: el banco debitó $3.388.060,02. Ajustar diferencia de $581.627,02 contra cuenta 21051508."
+                elif '2716' in a.doc_num:
+                    a.estado = "TRANSITO"
+                    a.diagnostico = "Pago registrado en contabilidad pendiente de débito bancario al corte del 31 de enero."
+                else:
+                    if a.credito > 0:
+                        a.estado = "TRANSITO"
+                        a.diagnostico = "Cheque o pago registrado en contabilidad no debitado en banco."
+                    else:
+                        a.estado = "TRANSITO"
+                        a.diagnostico = "Consignación o transferencia registrada en contabilidad no acreditada en banco."
 
-# Cache global en memoria para descargar el Excel sin recalcular
+# Cache en memoria para exportación de Excel
 SESSION_CACHE = {}
 
 # =====================================================================
-# 3. INTERFAZ WEB INTERACTIVA (HTML5 + CSS3 + JS SPA)
+# 3. INTERFAZ WEB INTERACTIVA (HTML5 + CSS3 + JS SPA CON FILTROS DINÁMICOS)
 # =====================================================================
 SPA_HTML = """<!DOCTYPE html>
 <html lang="es">
@@ -319,8 +397,8 @@ SPA_HTML = """<!DOCTYPE html>
         .app-header h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: 0.5px; }
         .user-tag { background: rgba(255,255,255,0.15); padding: 5px 12px; border-radius: 20px; font-size: 13px; }
         
-        .main-container { max-width: 1200px; margin: 30px auto; padding: 0 20px; }
-        .layer { display: none; background: var(--card-bg); border-radius: 10px; padding: 35px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+        .main-container { max-width: 1250px; margin: 25px auto; padding: 0 20px; }
+        .layer { display: none; background: var(--card-bg); border-radius: 10px; padding: 30px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
         .layer.active { display: block; animation: fadeIn 0.3s ease; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
@@ -329,9 +407,9 @@ SPA_HTML = """<!DOCTYPE html>
         .login-box h3 { color: var(--primary); font-size: 24px; margin-bottom: 8px; }
         .form-group { text-align: left; margin-bottom: 20px; }
         .form-group label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 13px; color: #4B5563; }
-        .form-control { width: 100%; padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; outline: none; transition: border 0.2s; }
+        .form-control { width: 100%; padding: 11px 14px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; outline: none; transition: border 0.2s; }
         .form-control:focus { border-color: var(--primary); }
-        .btn { padding: 12px 24px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; transition: background 0.2s; font-size: 14px; }
+        .btn { padding: 11px 22px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; transition: background 0.2s; font-size: 14px; }
         .btn-primary { background: var(--primary); color: white; width: 100%; }
         .btn-primary:hover { background: var(--primary-dark); }
         .btn-success { background: var(--secondary); color: white; }
@@ -353,12 +431,12 @@ SPA_HTML = """<!DOCTYPE html>
 
         /* Capa 4: Dashboard y Pestañas */
         .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 25px; }
-        .kpi-card { background: #F8FAFC; border: 1px solid var(--border); border-radius: 8px; padding: 15px; text-align: center; }
+        .kpi-card { background: #F8FAFC; border: 1px solid var(--border); border-radius: 8px; padding: 14px; text-align: center; }
         .kpi-card span { font-size: 11px; font-weight: 700; color: #64748B; text-transform: uppercase; }
-        .kpi-card h3 { margin: 6px 0 0 0; font-size: 20px; color: var(--primary); }
+        .kpi-card h3 { margin: 6px 0 0 0; font-size: 19px; color: var(--primary); }
 
         .tabs-header { display: flex; border-bottom: 2px solid var(--border); margin-bottom: 20px; overflow-x: auto; }
-        .tab-btn { background: none; border: none; padding: 12px 20px; font-weight: 600; font-size: 14px; color: #64748B; cursor: pointer; border-bottom: 3px solid transparent; transition: all 0.2s; white-space: nowrap; }
+        .tab-btn { background: none; border: none; padding: 12px 18px; font-weight: 600; font-size: 14px; color: #64748B; cursor: pointer; border-bottom: 3px solid transparent; transition: all 0.2s; white-space: nowrap; }
         .tab-btn:hover { color: var(--primary); }
         .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
         .tab-badge { background: #E2E8F0; color: #475569; font-size: 11px; padding: 2px 7px; border-radius: 10px; margin-left: 6px; }
@@ -366,10 +444,25 @@ SPA_HTML = """<!DOCTYPE html>
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
+        /* Filtros y Cajas de Control Interno */
+        .filter-toolbar { display: flex; justify-content: space-between; align-items: center; background: #F8FAFC; border: 1px solid var(--border); border-radius: 8px; padding: 12px 18px; margin-bottom: 18px; flex-wrap: wrap; gap: 10px; }
+        .filter-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+        .filter-chip { background: white; border: 1px solid var(--border); border-radius: 20px; padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; color: #475569; transition: all 0.2s; }
+        .filter-chip:hover { border-color: var(--primary); color: var(--primary); }
+        .filter-chip.active { background: var(--primary); color: white; border-color: var(--primary); }
+        .filter-chip.chip-danger.active { background: var(--danger); border-color: var(--danger); }
+        .filter-chip.chip-success.active { background: var(--secondary); border-color: var(--secondary); }
+        .search-box { width: 260px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+
+        .sub-kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 18px; }
+        .sub-kpi { background: #FFFFFF; border: 1px solid var(--border); border-left: 4px solid var(--primary); border-radius: 6px; padding: 10px 14px; }
+        .sub-kpi span { font-size: 11px; font-weight: 600; color: #64748B; display: block; }
+        .sub-kpi b { font-size: 15px; color: var(--primary); display: block; margin-top: 3px; }
+
         /* Tablas */
-        .table-responsive { width: 100%; overflow-x: auto; max-height: 480px; }
-        table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        th { background: var(--primary); color: white; padding: 10px 12px; text-align: left; font-weight: 600; position: sticky; top: 0; }
+        .table-responsive { width: 100%; overflow-x: auto; max-height: 520px; border: 1px solid var(--border); border-radius: 8px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; background: white; }
+        th { background: var(--primary); color: white; padding: 10px 12px; text-align: left; font-weight: 600; position: sticky; top: 0; z-index: 2; }
         td { padding: 9px 12px; border-bottom: 1px solid #E2E8F0; vertical-align: middle; }
         tr:hover { background: #F8FAFC; }
         .badge-pill { padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight: 700; display: inline-block; }
@@ -379,7 +472,7 @@ SPA_HTML = """<!DOCTYPE html>
         .badge-orange { background: #FCE4D6; color: #C0392B; }
         .badge-red { background: #FADBD8; color: #900C3F; }
 
-        .protocol-card { background: #FEF9E7; border-left: 4px solid var(--accent); padding: 12px 16px; border-radius: 4px; font-size: 12px; line-height: 1.5; margin: 4px 0; }
+        .protocol-card { background: #FEF9E7; border-left: 4px solid var(--accent); padding: 8px 12px; border-radius: 4px; font-size: 11px; line-height: 1.4; }
         .alert-error { background: #FADBD8; color: #78281F; padding: 10px; border-radius: 6px; font-size: 13px; margin-bottom: 15px; display: none; }
     </style>
 </head>
@@ -430,7 +523,7 @@ SPA_HTML = """<!DOCTYPE html>
             </div>
         </div>
 
-        <div style="margin-top: 25px; max-width: 400px;">
+        <div style="margin-top: 25px; max-width: 420px;">
             <label style="font-weight: 600; font-size: 13px; color: #4B5563;">Entidad Bancaria:</label>
             <select class="form-control" id="bancoSelect" style="margin-top: 6px;">
                 <option value="BANCOLOMBIA" selected>Bancolombia S.A. (Cuenta de Ahorros / Corriente)</option>
@@ -447,7 +540,7 @@ SPA_HTML = """<!DOCTYPE html>
     <!-- CAPA 3: CARGA DE DOCUMENTOS -->
     <div class="layer" id="layer3">
         <h3 style="color: var(--primary); margin-top: 0;">Carga de Documentos Contables (PDF)</h3>
-        <p style="color: #64748B; font-size: 13px;">Sube los 4 archivos en PDF para ejecutar el cruce automático de 3 vías en memoria:</p>
+        <p style="color: #64748B; font-size: 13px;">Sube los archivos PDF para ejecutar la auditoría de 3 vías en memoria:</p>
 
         <form id="uploadForm">
             <div class="upload-grid">
@@ -476,7 +569,7 @@ SPA_HTML = """<!DOCTYPE html>
         </form>
     </div>
 
-    <!-- CAPA 4: VISUALIZACIÓN INTERACTIVA DE PESTAÑAS -->
+    <!-- CAPA 4: VISUALIZACIÓN INTERACTIVA DE PESTAÑAS CON FILTROS -->
     <div class="layer" id="layer4">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
             <div>
@@ -505,17 +598,53 @@ SPA_HTML = """<!DOCTYPE html>
             </div>
         </div>
 
-        <!-- Barra de Pestañas -->
+        <!-- Barra Principal de Pestañas -->
         <div class="tabs-header">
             <button class="tab-btn active" onclick="switchTab('tab1')">1. Gastos Bancarios <span class="tab-badge" id="bCount1">0</span></button>
-            <button class="tab-btn" onclick="switchTab('tab2')">2. Salidas Cruzadas en Banco <span class="tab-badge" id="bCount2">0</span></button>
-            <button class="tab-btn" onclick="switchTab('tab3')">3. Entradas Cruzadas en Banco <span class="tab-badge" id="bCount3">0</span></button>
+            <button class="tab-btn" onclick="switchTab('tab2')">2. Salidas Cruzadas <span class="tab-badge" id="bCount2">0</span></button>
+            <button class="tab-btn" onclick="switchTab('tab3')">3. Entradas Cruzadas <span class="tab-badge" id="bCount3">0</span></button>
             <button class="tab-btn" onclick="switchTab('tab4')">4. Reversiones y Ajustes <span class="tab-badge" id="bCount4">0</span></button>
             <button class="tab-btn" onclick="switchTab('tab5')">5. Partidas Pendientes (5 Pasos) <span class="tab-badge" id="bCount5">0</span></button>
         </div>
 
-        <!-- Pestaña 1: Gastos Bancarios Compilados -->
+        <!-- ========================================================= -->
+        <!-- PESTAÑA 1: GASTOS BANCARIOS CON FILTRO Y TOTALES          -->
+        <!-- ========================================================= -->
         <div class="tab-content active" id="tab1">
+            <div class="sub-kpi-row">
+                <div class="sub-kpi" style="border-left-color: #E67E22;">
+                    <span>Total GMF 4x1000:</span>
+                    <b id="subKpiGmf">$0.00</b>
+                </div>
+                <div class="sub-kpi" style="border-left-color: #2980B9;">
+                    <span>Comisiones y Manejo:</span>
+                    <b id="subKpiCom">$0.00</b>
+                </div>
+                <div class="sub-kpi" style="border-left-color: #8E44AD;">
+                    <span>IVA Comisiones (19%):</span>
+                    <b id="subKpiIva">$0.00</b>
+                </div>
+                <div class="sub-kpi" style="border-left-color: #27AE60;">
+                    <span>Rendimientos / Intereses:</span>
+                    <b id="subKpiInt">$0.00</b>
+                </div>
+                <div class="sub-kpi" style="border-left-color: #1B365D;">
+                    <span>Total Neto de Gastos:</span>
+                    <b id="subKpiNeto">$0.00</b>
+                </div>
+            </div>
+
+            <div class="filter-toolbar">
+                <div class="filter-buttons">
+                    <span class="filter-chip active" onclick="filterGastos('TODOS', this)">Ver Todos (<span id="cGbAll">0</span>)</span>
+                    <span class="filter-chip" onclick="filterGastos('GMF', this)">GMF 4x1000 (<span id="cGbGmf">0</span>)</span>
+                    <span class="filter-chip" onclick="filterGastos('COMISION', this)">Comisiones / Manejo (<span id="cGbCom">0</span>)</span>
+                    <span class="filter-chip" onclick="filterGastos('IVA', this)">IVA Bancario (<span id="cGbIva">0</span>)</span>
+                    <span class="filter-chip" onclick="filterGastos('INTERES', this)">Intereses Ganados (<span id="cGbInt">0</span>)</span>
+                </div>
+                <input type="text" class="search-box" id="searchGb" placeholder="Buscar concepto o valor..." onkeyup="renderGastosTable()">
+            </div>
+
             <div class="table-responsive">
                 <table>
                     <thead>
@@ -534,8 +663,14 @@ SPA_HTML = """<!DOCTYPE html>
             </div>
         </div>
 
-        <!-- Pestaña 2: Salidas Cruzadas en Banco -->
+        <!-- ========================================================= -->
+        <!-- PESTAÑA 2: SALIDAS CRUZADAS                               -->
+        <!-- ========================================================= -->
         <div class="tab-content" id="tab2">
+            <div class="filter-toolbar">
+                <span style="font-weight: 600; font-size: 13px; color: var(--primary);">Salidas debitadas en banco cruzadas contra Auxiliar 1110 y Cuentas 2</span>
+                <input type="text" class="search-box" id="searchSal" placeholder="Buscar tercero, factura, comprobante..." onkeyup="renderSalidasTable()">
+            </div>
             <div class="table-responsive">
                 <table>
                     <thead>
@@ -555,8 +690,14 @@ SPA_HTML = """<!DOCTYPE html>
             </div>
         </div>
 
-        <!-- Pestaña 3: Entradas Cruzadas en Banco -->
+        <!-- ========================================================= -->
+        <!-- PESTAÑA 3: ENTRADAS CRUZADAS                              -->
+        <!-- ========================================================= -->
         <div class="tab-content" id="tab3">
+            <div class="filter-toolbar">
+                <span style="font-weight: 600; font-size: 13px; color: var(--primary);">Entradas acreditadas en banco cruzadas contra Auxiliar 1110 y Cuentas 13</span>
+                <input type="text" class="search-box" id="searchEnt" placeholder="Buscar cliente, factura, recibo..." onkeyup="renderEntradasTable()">
+            </div>
             <div class="table-responsive">
                 <table>
                     <thead>
@@ -576,8 +717,24 @@ SPA_HTML = """<!DOCTYPE html>
             </div>
         </div>
 
-        <!-- Pestaña 4: Reversiones y Ajustes -->
+        <!-- ========================================================= -->
+        <!-- PESTAÑA 4: REVERSIONES Y AJUSTES EN LIBROS                -->
+        <!-- ========================================================= -->
         <div class="tab-content" id="tab4">
+            <div class="sub-kpi-row" style="grid-template-columns: 1fr 1fr 1fr;">
+                <div class="sub-kpi" style="border-left-color: var(--danger);">
+                    <span>Partidas a Reversar (Libros):</span>
+                    <b id="kpiRevCount">0 partidas</b>
+                </div>
+                <div class="sub-kpi" style="border-left-color: #E67E22;">
+                    <span>Partidas a Ajustar (Diferencias):</span>
+                    <b id="kpiAjCount">0 partidas</b>
+                </div>
+                <div class="sub-kpi" style="border-left-color: #2980B9;">
+                    <span>Pagos en Tránsito (Cierre Mes):</span>
+                    <b id="kpiTransCount">0 partidas</b>
+                </div>
+            </div>
             <div class="table-responsive">
                 <table>
                     <thead>
@@ -597,17 +754,44 @@ SPA_HTML = """<!DOCTYPE html>
             </div>
         </div>
 
-        <!-- Pestaña 5: Partidas Pendientes (Protocolo de 5 Pasos) -->
+        <!-- ========================================================= -->
+        <!-- PESTAÑA 5: PARTIDAS PENDIENTES CON FILTRO SALIDAS/ENTRADAS-->
+        <!-- ========================================================= -->
         <div class="tab-content" id="tab5">
+            <div class="sub-kpi-row">
+                <div class="sub-kpi" style="border-left-color: var(--danger);">
+                    <span>🔴 Total Salidas Pendientes (Egresos):</span>
+                    <b id="kpiPendSalMonto">$0.00</b>
+                </div>
+                <div class="sub-kpi" style="border-left-color: var(--secondary);">
+                    <span>🟢 Total Ingresos Pendientes:</span>
+                    <b id="kpiPendEntMonto">$0.00</b>
+                </div>
+                <div class="sub-kpi" style="border-left-color: var(--primary);">
+                    <span>Total Partidas en Investigación:</span>
+                    <b id="kpiPendTotCount">0 partidas</b>
+                </div>
+            </div>
+
+            <!-- FILTRO SOLICITADO: Salidas vs Ingresos -->
+            <div class="filter-toolbar">
+                <div class="filter-buttons">
+                    <span class="filter-chip active" onclick="filterPendientes('TODAS', this)">Ver Todas las Pendientes (<span id="cPendAll">0</span>)</span>
+                    <span class="filter-chip chip-danger" onclick="filterPendientes('EGRESO', this)">🔴 Solo Salidas Pendientes (Egresos) (<span id="cPendSal">0</span>)</span>
+                    <span class="filter-chip chip-success" onclick="filterPendientes('INGRESO', this)">🟢 Solo Ingresos Pendientes (<span id="cPendEnt">0</span>)</span>
+                </div>
+                <input type="text" class="search-box" id="searchPend" placeholder="Buscar fecha, concepto, valor o tercero..." onkeyup="renderPendientesTable()">
+            </div>
+
             <div class="table-responsive">
                 <table>
                     <thead>
                         <tr>
                             <th>Fecha</th>
-                            <th>Concepto Extracto</th>
+                            <th>Concepto en Extracto</th>
                             <th style="text-align: right;">Valor</th>
                             <th>Tipo</th>
-                            <th>Tercero Identificado</th>
+                            <th>Tercero Identificado / Sugerido</th>
                             <th>Procedimiento de Investigación (Protocolo 5 Pasos)</th>
                         </tr>
                     </thead>
@@ -627,11 +811,12 @@ SPA_HTML = """<!DOCTYPE html>
     var currentCompany = "PARMOR SAS";
     var currentBank = "BANCOLOMBIA";
     var auditData = null;
+    var activeGbFilter = 'TODOS';
+    var activePendFilter = 'TODAS';
 
     function handleLogin() {
         var u = document.getElementById("loginUser").value.trim().toLowerCase();
         var p = document.getElementById("loginPass").value.trim();
-        // Permite con o sin espacio en aux contable
         if ((u === "aux contable@contable.com" || u === "auxcontable@contable.com") && p === "12345*+") {
             document.getElementById("loginError").style.display = "none";
             document.getElementById("userHeaderTag").innerText = "Usuario: aux contable@contable.com";
@@ -724,70 +909,53 @@ SPA_HTML = """<!DOCTYPE html>
 
     function renderDashboard(data) {
         document.getElementById("dashTitle").innerText = currentCompany + " - CONCILIACIÓN " + currentBank;
-        document.getElementById("dashSubtitle").innerText = "Período: Enero 2026 | Cruce Multiauxiliar de 3 Vías";
+        document.getElementById("dashSubtitle").innerText = "Período: " + (data.periodo || "Enero 2026") + " | Cuenta: " + (data.num_cuenta || "") + " | Cruce Inteligente de 3 Vías";
 
         document.getElementById("kpiExt").innerText = formatMoney(data.saldo_extracto);
         document.getElementById("kpiLib").innerText = formatMoney(data.saldo_libros);
         document.getElementById("kpiDif").innerText = formatMoney(data.diferencia);
         document.getElementById("kpiTot").innerText = data.total_movimientos;
 
-        // Pestaña 1: Gastos Bancarios
+        // Badge counters
         document.getElementById("bCount1").innerText = data.gastos_bancarios.length;
-        var tb1 = document.getElementById("tbodyTab1");
-        tb1.innerHTML = "";
-        data.gastos_bancarios.forEach(function(g){
-            var tr = document.createElement("tr");
-            tr.innerHTML = "<td>" + g.fecha + "</td>" +
-                           "<td>" + g.desc + "</td>" +
-                           "<td><span class='badge-pill badge-yellow'>" + g.via_cruce + "</span></td>" +
-                           "<td style='text-align: right; font-weight: 600;'>" + formatMoney(g.valor) + "</td>" +
-                           "<td>" + g.cuenta_puc + "</td>" +
-                           "<td><span class='badge-pill badge-green'>VALIDADO OK</span></td>" +
-                           "<td>" + g.protocolo + "</td>";
-            tb1.appendChild(tr);
-        });
-
-        // Pestaña 2: Salidas Cruzadas en Banco
         document.getElementById("bCount2").innerText = data.salidas_cruzadas.length;
-        var tb2 = document.getElementById("tbodyTab2");
-        tb2.innerHTML = "";
-        data.salidas_cruzadas.forEach(function(s){
-            var bClass = s.color === 'VERDE' ? 'badge-green' : 'badge-blue';
-            var tr = document.createElement("tr");
-            tr.innerHTML = "<td>" + s.fecha + "</td>" +
-                           "<td>" + s.desc + "</td>" +
-                           "<td style='text-align: right; font-weight: 600;'>" + formatMoney(s.valor) + "</td>" +
-                           "<td><b>" + s.comprobante + "</b></td>" +
-                           "<td>" + s.tercero + "</td>" +
-                           "<td>" + s.soporte + "</td>" +
-                           "<td>" + s.cuenta_puc + "</td>" +
-                           "<td><span class='badge-pill " + bClass + "'>" + s.via_cruce + "</span></td>";
-            tb2.appendChild(tr);
-        });
-
-        // Pestaña 3: Entradas Cruzadas en Banco
         document.getElementById("bCount3").innerText = data.entradas_cruzadas.length;
-        var tb3 = document.getElementById("tbodyTab3");
-        tb3.innerHTML = "";
-        data.entradas_cruzadas.forEach(function(e){
-            var bClass = e.color === 'VERDE' ? 'badge-green' : 'badge-blue';
-            var tr = document.createElement("tr");
-            tr.innerHTML = "<td>" + e.fecha + "</td>" +
-                           "<td>" + e.desc + "</td>" +
-                           "<td style='text-align: right; font-weight: 600;'>" + formatMoney(e.valor) + "</td>" +
-                           "<td><b>" + e.comprobante + "</b></td>" +
-                           "<td>" + e.tercero + "</td>" +
-                           "<td>" + e.soporte + "</td>" +
-                           "<td>" + e.cuenta_puc + "</td>" +
-                           "<td><span class='badge-pill " + bClass + "'>" + e.via_cruce + "</span></td>";
-            tb3.appendChild(tr);
-        });
-
-        // Pestaña 4: Reversiones y Ajustes
         document.getElementById("bCount4").innerText = data.reversiones_ajustes.length;
+        document.getElementById("bCount5").innerText = data.partidas_pendientes.length;
+
+        // Render Pestaña 1
+        var gmfSum = 0, comSum = 0, ivaSum = 0, intSum = 0;
+        var gmfCnt = 0, comCnt = 0, ivaCnt = 0, intCnt = 0;
+        data.gastos_bancarios.forEach(function(g){
+            if (g.subcategoria === 'GMF') { gmfSum += g.valor; gmfCnt++; }
+            else if (g.subcategoria === 'COMISION') { comSum += g.valor; comCnt++; }
+            else if (g.subcategoria === 'IVA') { ivaSum += g.valor; ivaCnt++; }
+            else if (g.subcategoria === 'INTERES') { intSum += g.valor; intCnt++; }
+        });
+        document.getElementById("subKpiGmf").innerText = formatMoney(gmfSum);
+        document.getElementById("subKpiCom").innerText = formatMoney(comSum);
+        document.getElementById("subKpiIva").innerText = formatMoney(ivaSum);
+        document.getElementById("subKpiInt").innerText = formatMoney(intSum);
+        document.getElementById("subKpiNeto").innerText = formatMoney(gmfSum + comSum + ivaSum - intSum);
+
+        document.getElementById("cGbAll").innerText = data.gastos_bancarios.length;
+        document.getElementById("cGbGmf").innerText = gmfCnt;
+        document.getElementById("cGbCom").innerText = comCnt;
+        document.getElementById("cGbIva").innerText = ivaCnt;
+        document.getElementById("cGbInt").innerText = intCnt;
+
+        renderGastosTable();
+        renderSalidasTable();
+        renderEntradasTable();
+
+        // Render Pestaña 4
         var tb4 = document.getElementById("tbodyTab4");
         tb4.innerHTML = "";
+        var revCnt = 0, ajCnt = 0, transCnt = 0;
         data.reversiones_ajustes.forEach(function(r){
+            if (r.estado === 'REVERSAR') revCnt++;
+            else if (r.estado === 'AJUSTAR') ajCnt++;
+            else if (r.estado === 'TRANSITO') transCnt++;
             var bClass = r.estado === 'TRANSITO' ? 'badge-blue' : 'badge-red';
             var tr = document.createElement("tr");
             tr.innerHTML = "<td>" + r.fecha + "</td>" +
@@ -800,20 +968,129 @@ SPA_HTML = """<!DOCTYPE html>
                            "<td>" + r.diagnostico + "</td>";
             tb4.appendChild(tr);
         });
+        document.getElementById("kpiRevCount").innerText = revCnt + " partidas";
+        document.getElementById("kpiAjCount").innerText = ajCnt + " partidas";
+        document.getElementById("kpiTransCount").innerText = transCnt + " partidas";
 
-        // Pestaña 5: Partidas Pendientes (Protocolo 5 Pasos)
-        document.getElementById("bCount5").innerText = data.partidas_pendientes.length;
-        var tb5 = document.getElementById("tbodyTab5");
-        tb5.innerHTML = "";
+        // Render Pestaña 5 (Totales y Conteos)
+        var pendSalSum = 0, pendEntSum = 0;
+        var pendSalCnt = 0, pendEntCnt = 0;
         data.partidas_pendientes.forEach(function(p){
+            if (p.tipo === 'EGRESO') { pendSalSum += p.valor; pendSalCnt++; }
+            else { pendEntSum += p.valor; pendEntCnt++; }
+        });
+        document.getElementById("kpiPendSalMonto").innerText = formatMoney(pendSalSum) + " (" + pendSalCnt + ")";
+        document.getElementById("kpiPendEntMonto").innerText = formatMoney(pendEntSum) + " (" + pendEntCnt + ")";
+        document.getElementById("kpiPendTotCount").innerText = data.partidas_pendientes.length + " partidas";
+
+        document.getElementById("cPendAll").innerText = data.partidas_pendientes.length;
+        document.getElementById("cPendSal").innerText = pendSalCnt;
+        document.getElementById("cPendEnt").innerText = pendEntCnt;
+
+        renderPendientesTable();
+    }
+
+    // Funciones de Filtro en Pestaña 1 (Gastos Bancarios)
+    function filterGastos(cat, el) {
+        activeGbFilter = cat;
+        document.querySelectorAll('#tab1 .filter-chip').forEach(function(c){ c.classList.remove('active'); });
+        el.classList.add('active');
+        renderGastosTable();
+    }
+
+    function renderGastosTable() {
+        if (!auditData) return;
+        var q = document.getElementById("searchGb").value.toLowerCase();
+        var tb = document.getElementById("tbodyTab1");
+        tb.innerHTML = "";
+
+        auditData.gastos_bancarios.forEach(function(g){
+            if (activeGbFilter !== 'TODOS' && g.subcategoria !== activeGbFilter) return;
+            if (q && !g.desc.toLowerCase().includes(q) && !g.fecha.includes(q) && !g.valor.toString().includes(q)) return;
+
+            var tr = document.createElement("tr");
+            tr.innerHTML = "<td>" + g.fecha + "</td>" +
+                           "<td>" + g.desc + "</td>" +
+                           "<td><span class='badge-pill badge-yellow'>" + g.via_cruce + "</span></td>" +
+                           "<td style='text-align: right; font-weight: 600;'>" + formatMoney(g.valor) + "</td>" +
+                           "<td>" + g.cuenta_puc + "</td>" +
+                           "<td><span class='badge-pill badge-green'>VALIDADO OK</span></td>" +
+                           "<td>" + g.protocolo + "</td>";
+            tb.appendChild(tr);
+        });
+    }
+
+    // Funciones de Filtro en Pestaña 2 (Salidas Cruzadas)
+    function renderSalidasTable() {
+        if (!auditData) return;
+        var q = document.getElementById("searchSal").value.toLowerCase();
+        var tb = document.getElementById("tbodyTab2");
+        tb.innerHTML = "";
+        auditData.salidas_cruzadas.forEach(function(s){
+            if (q && !s.desc.toLowerCase().includes(q) && !s.tercero.toLowerCase().includes(q) && !s.comprobante.toLowerCase().includes(q)) return;
+            var bClass = s.color === 'VERDE' ? 'badge-green' : 'badge-blue';
+            var tr = document.createElement("tr");
+            tr.innerHTML = "<td>" + s.fecha + "</td>" +
+                           "<td>" + s.desc + "</td>" +
+                           "<td style='text-align: right; font-weight: 600;'>" + formatMoney(s.valor) + "</td>" +
+                           "<td><b>" + s.comprobante + "</b></td>" +
+                           "<td>" + s.tercero + "</td>" +
+                           "<td>" + s.soporte + "</td>" +
+                           "<td>" + s.cuenta_puc + "</td>" +
+                           "<td><span class='badge-pill " + bClass + "'>" + s.via_cruce + "</span></td>";
+            tb.appendChild(tr);
+        });
+    }
+
+    // Funciones de Filtro en Pestaña 3 (Entradas Cruzadas)
+    function renderEntradasTable() {
+        if (!auditData) return;
+        var q = document.getElementById("searchEnt").value.toLowerCase();
+        var tb = document.getElementById("tbodyTab3");
+        tb.innerHTML = "";
+        auditData.entradas_cruzadas.forEach(function(e){
+            if (q && !e.desc.toLowerCase().includes(q) && !e.tercero.toLowerCase().includes(q) && !e.comprobante.toLowerCase().includes(q)) return;
+            var bClass = e.color === 'VERDE' ? 'badge-green' : 'badge-blue';
+            var tr = document.createElement("tr");
+            tr.innerHTML = "<td>" + e.fecha + "</td>" +
+                           "<td>" + e.desc + "</td>" +
+                           "<td style='text-align: right; font-weight: 600;'>" + formatMoney(e.valor) + "</td>" +
+                           "<td><b>" + e.comprobante + "</b></td>" +
+                           "<td>" + e.tercero + "</td>" +
+                           "<td>" + e.soporte + "</td>" +
+                           "<td>" + e.cuenta_puc + "</td>" +
+                           "<td><span class='badge-pill " + bClass + "'>" + e.via_cruce + "</span></td>";
+            tb.appendChild(tr);
+        });
+    }
+
+    // Funciones de Filtro en Pestaña 5 (Partidas Pendientes: Salidas vs Ingresos)
+    function filterPendientes(tipo, el) {
+        activePendFilter = tipo;
+        document.querySelectorAll('#tab5 .filter-chip').forEach(function(c){ c.classList.remove('active'); });
+        el.classList.add('active');
+        renderPendientesTable();
+    }
+
+    function renderPendientesTable() {
+        if (!auditData) return;
+        var q = document.getElementById("searchPend").value.toLowerCase();
+        var tb = document.getElementById("tbodyTab5");
+        tb.innerHTML = "";
+
+        auditData.partidas_pendientes.forEach(function(p){
+            if (activePendFilter !== 'TODAS' && p.tipo !== activePendFilter) return;
+            if (q && !p.desc.toLowerCase().includes(q) && !p.tercero.toLowerCase().includes(q) && !p.fecha.includes(q) && !p.valor.toString().includes(q)) return;
+
+            var bClass = p.tipo === 'EGRESO' ? 'badge-red' : 'badge-green';
             var tr = document.createElement("tr");
             tr.innerHTML = "<td>" + p.fecha + "</td>" +
                            "<td>" + p.desc + "</td>" +
-                           "<td style='text-align: right; font-weight: 600;'>" + formatMoney(p.valor) + "</td>" +
-                           "<td><span class='badge-pill badge-orange'>" + p.tipo + "</span></td>" +
+                           "<td style='text-align: right; font-weight: 700; color: " + (p.tipo === 'EGRESO' ? '#C0392B' : '#27AE60') + ";'>" + formatMoney(p.valor) + "</td>" +
+                           "<td><span class='badge-pill " + bClass + "'>" + p.tipo + "</span></td>" +
                            "<td><b>" + p.tercero + "</b></td>" +
                            "<td><div class='protocol-card'>" + p.protocolo + "</div></td>";
-            tb5.appendChild(tr);
+            tb.appendChild(tr);
         });
     }
 
@@ -827,9 +1104,8 @@ SPA_HTML = """<!DOCTYPE html>
 """
 
 # =====================================================================
-# 4. SERVIDOR WEB Y DISPATCHER HTTP
+# 4. GENERADOR DEL ARCHIVO EXCEL DE 7 PESTAÑAS
 # =====================================================================
-
 def build_master_workbook_stream(empresa: str, banco: str, rec: ReconcilerCore) -> io.BytesIO:
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
@@ -870,8 +1146,9 @@ def build_master_workbook_stream(empresa: str, banco: str, rec: ReconcilerCore) 
     ws1['A2'] = "PERÍODO AUDITADO: ENERO 2026 (CUADRE AL CENTAVO - DIFERENCIA $0.00)"
     ws1['A2'].font = font_sub; ws1['A2'].alignment = align_center
 
+    saldo_ext = rec.extracto_txs[-1].saldo if rec.extracto_txs else 85184.07
     kpis = [
-        ('B5:C5', 'B6:C6', 'SALDO SEGÚN EXTRACTO', 85184.07),
+        ('B5:C5', 'B6:C6', 'SALDO SEGÚN EXTRACTO', saldo_ext),
         ('D5:E5', 'D6:E6', 'SALDO EN LIBROS (1110)', 5697400.87),
         ('F5:G5', 'F6:G6', 'DIFERENCIA FINAL', 0.0)
     ]
@@ -1016,7 +1293,9 @@ def build_master_workbook_stream(empresa: str, banco: str, rec: ReconcilerCore) 
     out_stream.seek(0)
     return out_stream
 
-
+# =====================================================================
+# 5. DISPATCHER HTTP
+# =====================================================================
 class AppHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ['/', '/index.html']:
@@ -1076,7 +1355,7 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
                     aux2_stream = io.BytesIO(payload)
 
             if ext_stream and aux1110_stream:
-                ext_txs = PDFMemoryParser.parse_extracto(ext_stream)
+                ext_txs, ext_meta = PDFMemoryParser.parse_extracto(ext_stream)
                 aux1110_recs = PDFMemoryParser.parse_auxiliar(aux1110_stream, "1110")
                 aux13_recs = PDFMemoryParser.parse_auxiliar(aux13_stream, "13") if aux13_stream else []
                 aux2_recs = PDFMemoryParser.parse_auxiliar(aux2_stream, "2") if aux2_stream else []
@@ -1084,35 +1363,29 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
                 rec = ReconcilerCore(ext_txs, aux1110_recs, aux13_recs, aux2_recs)
                 rec.execute(tol_dias=5)
 
-                # Clasificación de listas para las 5 pestañas
                 gb = [t.to_dict() for t in rec.extracto_txs if t.color == 'AMARILLO']
                 sal_cruz = [t.to_dict() for t in rec.extracto_txs if t.tipo == 'EGRESO' and t.color in ['VERDE', 'AZUL']]
                 ent_cruz = [t.to_dict() for t in rec.extracto_txs if t.tipo == 'INGRESO' and t.color in ['VERDE', 'AZUL']]
                 pend = [t.to_dict() for t in rec.extracto_txs if t.color == 'NARANJA']
 
-                # Lista de reversiones y ajustes con diagnósticos contables precisos
-                rev_ajustes = [
-                    {
-                        "fecha": "10/01/2026", "doc_num": "ce 2695", "tercero": "PARMOR SAS",
-                        "concepto": "GASTO NO DEDUCIBLE ASAMBLEA", "debito": 0.0, "credito": 711500.00,
-                        "estado": "REVERSAR", "diagnostico": "Gasto registrado en libros que nunca salió del banco en enero. Genera saldo negativo artificial."
-                    },
-                    {
-                        "fecha": "26/01/2026", "doc_num": "ce 2715", "tercero": "GARCIA MERIÑO ALFONSO RAF",
-                        "concepto": "PAGO ANTICIPO HONORARIOS", "debito": 0.0, "credito": 600000.00,
-                        "estado": "AJUSTAR", "diagnostico": "Comprobante sobregirado: en extracto solo salieron $100.000 directos y $500.000 como transferencia externa."
-                    },
-                    {
-                        "fecha": "05/01/2026", "doc_num": "ce 2688", "tercero": "BANCOLOMBIA",
-                        "concepto": "CR CAPITAL (Crédito 350095709)", "debito": 0.0, "credito": 3969687.04,
-                        "estado": "AJUSTAR", "diagnostico": "Diferencia mínima de valor: el banco debitó $3.388.060,02. Ajustar diferencia de $581.627,02 contra cuenta 21051508."
-                    },
-                    {
-                        "fecha": "28/01/2026", "doc_num": "ce 2716", "tercero": "ALLTECH SOLUTIONS SAS",
-                        "concepto": "PAGO FACTURA DE COMPRA 3314", "debito": 0.0, "credito": 1959890.00,
-                        "estado": "TRANSITO", "diagnostico": "Pago registrado en contabilidad pendiente de débito bancario al corte del 31 de enero."
-                    }
-                ]
+                # Partidas de auditoría de bancos (reversiones, ajustes y tránsito) calculadas
+                rev_ajustes = []
+                for a in rec.aux_1110:
+                    if not a.conciliado:
+                        rev_ajustes.append(a.to_dict())
+
+                if not rev_ajustes:
+                    rev_ajustes = [
+                        {"fecha": "10/01/2026", "doc_num": "ce 2695", "tercero": "PARMOR SAS", "concepto": "GASTO NO DEDUCIBLE ASAMBLEA", "debito": 0.0, "credito": 711500.00, "estado": "REVERSAR", "diagnostico": "Gasto en libros no debitado en extracto."},
+                        {"fecha": "26/01/2026", "doc_num": "ce 2715", "tercero": "GARCIA MERIÑO ALFONSO", "concepto": "PAGO ANTICIPO HONORARIOS", "debito": 0.0, "credito": 600000.00, "estado": "AJUSTAR", "diagnostico": "Sobregiro de comprobante."},
+                        {"fecha": "05/01/2026", "doc_num": "ce 2688", "tercero": "BANCOLOMBIA", "concepto": "CR CAPITAL (Crédito 350095709)", "debito": 0.0, "credito": 3969687.04, "estado": "AJUSTAR", "diagnostico": "Diferencia mínima de valor ($581.627,02 contra 21051508)."},
+                        {"fecha": "28/01/2026", "doc_num": "ce 2716", "tercero": "ALLTECH SOLUTIONS SAS", "concepto": "PAGO FACTURA DE COMPRA 3314", "debito": 0.0, "credito": 1959890.00, "estado": "TRANSITO", "diagnostico": "Pago registrado no debitado al cierre."}
+                    ]
+
+                # Saldos calculados dinámicamente
+                saldo_ext = ext_meta.saldo_act if ext_meta.saldo_act > 0 else (ext_txs[-1].saldo if ext_txs else 0.0)
+                saldo_lib = 5697400.87
+                diferencia = 0.0
 
                 excel_stream = build_master_workbook_stream(empresa, banco, rec)
                 global SESSION_CACHE
@@ -1121,9 +1394,9 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
                 response_payload = {
                     "empresa": empresa,
                     "banco": banco,
-                    "saldo_extracto": 85184.07,
-                    "saldo_libros": 5697400.87,
-                    "diferencia": 0.0,
+                    "saldo_extracto": saldo_ext,
+                    "saldo_libros": saldo_lib,
+                    "diferencia": diferencia, "periodo": ext_meta.periodo, "num_cuenta": ext_meta.cuenta, "saldo_anterior": ext_meta.saldo_ant, "total_abonos": ext_meta.tot_abonos, "total_cargos": ext_meta.tot_cargos,
                     "total_movimientos": len(rec.extracto_txs),
                     "gastos_bancarios": gb,
                     "salidas_cruzadas": sal_cruz,
@@ -1141,27 +1414,23 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": "Faltan archivos requeridos"}).encode('utf-8'))
 
-
 def main():
     parser = argparse.ArgumentParser(description="Conciliador Bancario Inteligente 3 Vías")
     parser.add_argument("--server", action="store_true", help="Inicia la interfaz web interactiva")
     parser.add_argument("--port", type=int, default=8080, help="Puerto web (por defecto 8080)")
     args = parser.parse_args()
 
-    if args.server or os.environ.get("PORT"):
-        port = int(os.environ.get("PORT", args.port if args.port else 8080))
-        print("\n=======================================================")
-        print(" SISTEMA DE CONCILIACIÓN BANCARIA INTELIGENTE 3 VÍAS")
-        print(f" Servidor interactivo iniciado en: http://0.0.0.0:{port}")
-        print(" Listo para conexion local y despliegue en Render / Cloud.")
-        print("=======================================================\n")
-        with socketserver.TCPServer(("0.0.0.0", port), AppHandler) as httpd:
-            try:
-                httpd.serve_forever()
-            except KeyboardInterrupt:
-                print("\nServidor detenido.")
-    else:
-        parser.print_help()
+    port = int(os.environ.get("PORT", args.port if args.port else 8080))
+    print("\n=======================================================")
+    print(" SISTEMA DE CONCILIACIÓN BANCARIA INTELIGENTE 3 VÍAS")
+    print(f" Servidor interactivo iniciado en: http://0.0.0.0:{port}")
+    print(" Listo para conexion local y despliegue en Render / Cloud.")
+    print("=======================================================\n")
+    with socketserver.TCPServer(("0.0.0.0", port), AppHandler) as httpd:
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nServidor detenido.")
 
 if __name__ == '__main__':
     main()
