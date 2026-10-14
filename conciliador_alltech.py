@@ -47,6 +47,8 @@ class BankTx:
         self.cuenta_puc = "1305 / 2335 / 2805"
         self.diagnostico = ""
         self.protocolo = "Aplicar Protocolo 5 Pasos (Drive -> Grupos -> Contador -> Tesorero -> Abono/Anticipo)"
+        self.tiene_tercero = False
+        self.modo_inicial = "OPCION"
         self.opciones_similares = []
 
     def to_dict(self):
@@ -66,6 +68,8 @@ class BankTx:
             "cuenta_puc": self.cuenta_puc,
             "diagnostico": self.diagnostico,
             "protocolo": self.protocolo,
+            "tiene_tercero": self.tiene_tercero,
+            "modo_inicial": self.modo_inicial,
             "opciones_similares": self.opciones_similares
         }
 
@@ -102,13 +106,35 @@ class AuxRec:
 
 class StatementMetadata:
     def __init__(self, cuenta: str = "", periodo: str = "", saldo_ant: float = 0.0, 
-                 tot_abonos: float = 0.0, tot_cargos: float = 0.0, saldo_act: float = 0.0):
+                 tot_abonos: float = 0.0, tot_cargos: float = 0.0, saldo_act: float = 0.0, banco_detectado: str = ""):
         self.cuenta = cuenta
         self.periodo = periodo
         self.saldo_ant = saldo_ant
         self.tot_abonos = tot_abonos
         self.tot_cargos = tot_cargos
         self.saldo_act = saldo_act
+        self.banco_detectado = banco_detectado
+
+# Directorio de NITs/CC principales de PARMOR SAS y ALLTECH SOLUTIONS SAS para cruce automático en extractos Davivienda/BBVA/Bancolombia
+NIT_TERCEROS_MAP = {
+    "9011882675": "VIMECO SAS",
+    "901188267": "VIMECO SAS",
+    "9003598708": "MEDINA PEÑA HERNANDO",
+    "900359870": "MEDINA PEÑA HERNANDO",
+    "9007912580": "CONJUNTO RESIDENCIAL D'COTA 1 P.H.",
+    "900791258": "CONJUNTO RESIDENCIAL D'COTA 1 P.H.",
+    "9011434986": "DEFENCE COLOMBIA SAS",
+    "901143498": "DEFENCE COLOMBIA SAS",
+    "1032398641": "MONTOYA CORREDOR EVER GI",
+    "9010143082": "PUERTAS MOTORES Y ACCESO",
+    "901014308": "PUERTAS MOTORES Y ACCESO",
+    "9007284873": "NOVAPRINT SAS",
+    "900728487": "NOVAPRINT SAS",
+    "9014915148": "PARMOR SAS",
+    "901491514": "PARMOR SAS",
+    "9005449081": "ALLTECH SOLUTIONS SAS",
+    "900544908": "ALLTECH SOLUTIONS SAS",
+}
 
 class PDFMemoryParser:
     @staticmethod
@@ -122,38 +148,141 @@ class PDFMemoryParser:
         return "\n".join(pages_text)
 
     @classmethod
-    def parse_extracto_metadata(cls, text: str) -> StatementMetadata:
-        saldo_ant = 0.0
-        tot_abonos = 0.0
-        tot_cargos = 0.0
-        saldo_act = 0.0
-        cuenta = "S/N"
-        periodo = "Mes Auditado"
-
-        m_ant = re.search(r'SALDO ANTERIOR\s+\$\s*([\d,]+\.\d{2})', text)
-        if m_ant: saldo_ant = float(m_ant.group(1).replace(',', ''))
-
-        m_ab = re.search(r'TOTAL ABONOS\s+\$\s*([\d,]+\.\d{2})', text)
-        if m_ab: tot_abonos = float(m_ab.group(1).replace(',', ''))
-
-        m_cg = re.search(r'TOTAL CARGOS\s+\$\s*([\d,]+\.\d{2})', text)
-        if m_cg: tot_cargos = float(m_cg.group(1).replace(',', ''))
-
-        m_act = re.search(r'SALDO ACTUAL\s+\$\s*([\d,]+\.\d{2})', text)
-        if m_act: saldo_act = float(m_act.group(1).replace(',', ''))
-
-        m_cta = re.search(r'N[ÚU]MERO\s+(\d+)', text)
-        if m_cta: cuenta = m_cta.group(1)
-
-        m_per = re.search(r'DESDE:\s*([\d/-]+)\s+HASTA:\s*([\d/-]+)', text)
-        if m_per: periodo = f"{m_per.group(1)} a {m_per.group(2)}"
-
-        return StatementMetadata(cuenta, periodo, saldo_ant, tot_abonos, tot_cargos, saldo_act)
+    def detect_bank_from_text(cls, text: str) -> str:
+        t_u = text.upper()
+        if 'DAVIVIENDA' in t_u or 'CLASE DE MOVIMIENTO' in t_u or 'MAS CREDITOS' in t_u or 'MÁS CRÉDITOS' in t_u:
+            return 'DAVIVIENDA'
+        if 'BBVA' in t_u or 'SALDO CIERRE MES ANTERIOR' in t_u or 'FECHA OPERACIÓN' in t_u or 'ABONO CON BRE-B' in t_u:
+            return 'BBVA'
+        return 'BANCOLOMBIA'
 
     @classmethod
     def parse_extracto(cls, stream: io.BytesIO) -> Tuple[List[BankTx], StatementMetadata]:
         text = cls.extract_text(stream)
-        meta = cls.parse_extracto_metadata(text)
+        bank_type = cls.detect_bank_from_text(text)
+
+        if bank_type == 'DAVIVIENDA':
+            return cls._parse_extracto_davivienda(text)
+        elif bank_type == 'BBVA':
+            return cls._parse_extracto_bbva(text)
+        else:
+            return cls._parse_extracto_bancolombia(text)
+
+    @classmethod
+    def _parse_extracto_davivienda(cls, text: str) -> Tuple[List[BankTx], StatementMetadata]:
+        saldo_ant = 0.0; tot_abonos = 0.0; tot_cargos = 0.0; saldo_act = 0.0
+        cuenta = "1089 0007 1854"; periodo = "ENERO 2026"
+
+        m_ant = re.search(r'Saldo Anterior\s+\$\s*([\d,]+\.\d{2})', text, re.I)
+        if m_ant: saldo_ant = float(m_ant.group(1).replace(',', ''))
+        m_ab = re.search(r'M[áa]s Cr[ée]ditos\s+\$\s*([\d,]+\.\d{2})', text, re.I)
+        if m_ab: tot_abonos = float(m_ab.group(1).replace(',', ''))
+        m_cg = re.search(r'Menos D[ée]bitos\s+\$\s*([\d,]+\.\d{2})', text, re.I)
+        if m_cg: tot_cargos = float(m_cg.group(1).replace(',', ''))
+        m_act = re.search(r'Nuevo Saldo\s+\$\s*([\d,]+\.\d{2})', text, re.I)
+        if m_act: saldo_act = float(m_act.group(1).replace(',', ''))
+        m_cta = re.search(r'CUENTA DE (?:AHORROS|CORRIENTE)\s*\n\s*([\d\s]{10,22})', text, re.I)
+        if m_cta: cuenta = m_cta.group(1).strip()
+        m_per = re.search(r'INFORME DEL MES:\s*([^\n]+)', text, re.I)
+        if m_per: periodo = m_per.group(1).strip()
+
+        meta = StatementMetadata(cuenta, periodo, saldo_ant, tot_abonos, tot_cargos, saldo_act, 'DAVIVIENDA')
+        txs = []
+        running_saldo = saldo_ant
+        lines = text.split('\n')
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            m = re.match(r'^\s*(\d{2})\s+(\d{2})\s+\$\s*([\d,]+\.\d{2})([\+\-])\s+(\d+)\s+(.*?)\s*$', line)
+            if m:
+                d_str, m_str, val_str, sign, doc_str, rest = m.groups()
+                parts_rest = re.split(r'\s{3,}', rest.strip())
+                desc = parts_rest[0].strip()
+                if i + 1 < len(lines):
+                    nxt = lines[i + 1].strip()
+                    if nxt and not re.match(r'^\d{2}\s+\d{2}\s+\$', nxt) and not any(k in nxt.upper() for k in ['ESTE PRODUCTO', 'BANCO DAVIVIENDA', 'CUALQUIER DIFERENCIA', 'RECUERDE QUE', 'CUENTA DE AHORROS', 'FECHA', 'APRECIADO']):
+                        desc += " " + nxt
+                        i += 1
+                val = float(val_str.replace(',', ''))
+                tipo = 'INGRESO' if sign == '+' else 'EGRESO'
+                running_saldo += val if tipo == 'INGRESO' else -val
+                try: fecha_dt = datetime.date(2026, int(m_str), int(d_str))
+                except ValueError: fecha_dt = None
+                btx = BankTx(f"{d_str}/{m_str}/2026", fecha_dt, f"[Doc:{doc_str}] {desc}", val, tipo, round(running_saldo, 2))
+                txs.append(btx)
+            i += 1
+
+        if meta.saldo_act == 0.0 and txs:
+            meta.saldo_act = txs[-1].saldo
+        return txs, meta
+
+    @classmethod
+    def _parse_extracto_bbva(cls, text: str) -> Tuple[List[BankTx], StatementMetadata]:
+        saldo_ant = 0.0; tot_abonos = 0.0; tot_cargos = 0.0; saldo_act = 0.0
+        cuenta = "001308200200004415"; periodo = "01-01-2026 a 31-01-2026"
+
+        m_ant = re.search(r'SALDO CIERRE MES ANTERIOR\s+([\d,]+\.\d{2})', text, re.I)
+        if m_ant: saldo_ant = float(m_ant.group(1).replace(',', ''))
+        m_ab = re.search(r'\+\s*ABONOS\s+\d+\s+([\d,]+\.\d{2})', text, re.I)
+        if m_ab: tot_abonos += float(m_ab.group(1).replace(',', ''))
+        m_int = re.search(r'\+\s*INTERESES RECIBIDOS\s+\d+\s+([\d,]+\.\d{2})', text, re.I)
+        if m_int: tot_abonos += float(m_int.group(1).replace(',', ''))
+        m_cg = re.search(r'-\s*CARGOS\s+\d+\s+([\d,]+\.\d{2})', text, re.I)
+        if m_cg: tot_cargos += float(m_cg.group(1).replace(',', ''))
+        m_gmf = re.search(r'-\s*4 POR MIL\s+\d+\s+([\d,]+\.\d{2})', text, re.I)
+        if m_gmf: tot_cargos += float(m_gmf.group(1).replace(',', ''))
+        m_act = re.search(r'SALDO FINAL\s+([\d,]+\.\d{2})', text, re.I)
+        if m_act: saldo_act = float(m_act.group(1).replace(',', ''))
+        m_cta = re.search(r'(\d{18})', text)
+        if m_cta: cuenta = m_cta.group(1)
+        m_per = re.search(r'PER[ÍI]ODO DESDE:\s*([\d\-]+)\s+HASTA:\s*([\d\-]+)', text, re.I)
+        if m_per: periodo = f"{m_per.group(1)} a {m_per.group(2)}"
+
+        meta = StatementMetadata(cuenta, periodo, saldo_ant, tot_abonos, tot_cargos, saldo_act, 'BBVA')
+        txs = []
+        prev_saldo = saldo_ant
+        for line in text.split('\n'):
+            m = re.match(r'^\s*(?:(\d+)\s+)?(\d{2}-\d{2}-\d{4})\s+(\d{2}-\d{2}-\d{4})\s+(.*?)\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s*$', line)
+            if m:
+                mov_id, f_op, f_val, desc, val_str, sal_str = m.groups()
+                val = float(val_str.replace(',', ''))
+                sal = float(sal_str.replace(',', ''))
+                if abs((prev_saldo + val) - sal) <= 1.0:
+                    tipo = 'INGRESO'
+                elif abs((prev_saldo - val) - sal) <= 1.0:
+                    tipo = 'EGRESO'
+                else:
+                    tipo = 'INGRESO' if any(k in desc.upper() for k in ['ABONO', 'DEP.']) else 'EGRESO'
+                prev_saldo = sal
+                parts = f_op.split('-')
+                try: fecha_dt = datetime.date(int(parts[2]), int(parts[1]), int(parts[0]))
+                except (ValueError, IndexError): fecha_dt = None
+                f_fmt = f_op.replace('-', '/')
+                txs.append(BankTx(f_fmt, fecha_dt, desc.strip(), val, tipo, sal))
+
+        if meta.saldo_act == 0.0 and txs:
+            meta.saldo_act = txs[-1].saldo
+        return txs, meta
+
+    @classmethod
+    def _parse_extracto_bancolombia(cls, text: str) -> Tuple[List[BankTx], StatementMetadata]:
+        saldo_ant = 0.0; tot_abonos = 0.0; tot_cargos = 0.0; saldo_act = 0.0
+        cuenta = "S/N"; periodo = "Mes Auditado"
+
+        m_ant = re.search(r'SALDO ANTERIOR\s+\$\s*([\d,]+\.\d{2})', text)
+        if m_ant: saldo_ant = float(m_ant.group(1).replace(',', ''))
+        m_ab = re.search(r'TOTAL ABONOS\s+\$\s*([\d,]+\.\d{2})', text)
+        if m_ab: tot_abonos = float(m_ab.group(1).replace(',', ''))
+        m_cg = re.search(r'TOTAL CARGOS\s+\$\s*([\d,]+\.\d{2})', text)
+        if m_cg: tot_cargos = float(m_cg.group(1).replace(',', ''))
+        m_act = re.search(r'SALDO ACTUAL\s+\$\s*([\d,]+\.\d{2})', text)
+        if m_act: saldo_act = float(m_act.group(1).replace(',', ''))
+        m_cta = re.search(r'N[ÚU]MERO\s+(\d+)', text)
+        if m_cta: cuenta = m_cta.group(1)
+        m_per = re.search(r'DESDE:\s*([\d/-]+)\s+HASTA:\s*([\d/-]+)', text)
+        if m_per: periodo = f"{m_per.group(1)} a {m_per.group(2)}"
+
+        meta = StatementMetadata(cuenta, periodo, saldo_ant, tot_abonos, tot_cargos, saldo_act, 'BANCOLOMBIA')
         txs = []
         for line in text.split('\n'):
             line_s = line.strip()
@@ -170,31 +299,39 @@ class PDFMemoryParser:
                 except ValueError: fecha_dt = None
                 s_val = float(s_str.replace(',', '')) if s_str != '.00' else 0.0
                 txs.append(BankTx(f"{f_str}/2026", fecha_dt, desc, abs(v), tipo, s_val))
-        
-        # Si no se detectó saldo actual en encabezado, tomar el saldo del último movimiento
+
         if meta.saldo_act == 0.0 and txs:
             meta.saldo_act = txs[-1].saldo
         if meta.tot_abonos == 0.0:
             meta.tot_abonos = sum(t.valor for t in txs if t.tipo == 'INGRESO')
         if meta.tot_cargos == 0.0:
             meta.tot_cargos = sum(t.valor for t in txs if t.tipo == 'EGRESO')
-
         return txs, meta
 
-
     @classmethod
-    def parse_auxiliar(cls, stream: io.BytesIO, cta_prefix: str = "1110") -> List[AuxRec]:
+    def parse_auxiliar(cls, stream: io.BytesIO, cta_prefix: str = "1110", target_bank: Optional[str] = None) -> List[AuxRec]:
         text = cls.extract_text(stream)
         records = []
         curr_tercero = ""
         curr_cuenta = cta_prefix
+        curr_cta_bank = None
         for line in text.split('\n'):
             line_s = line.strip()
             if not line_s or 'SALDO INICIAL' in line_s or 'Total para' in line_s:
                 continue
-            m_cta = re.match(r'^\s*(\d{6,8})\s+([A-ZÁÉÍÓÚÑ0-9\s\.,\-\(\)%]+)$', line_s)
+            m_cta = re.match(r'^\s*(\d{6,8})\s+([A-ZÁÉÍÓÚÑ0-9\s\.,\-\(\)%#]+)$', line_s)
             if m_cta and not re.search(r'\d{2}/\d{2}/\d{4}', line_s):
                 curr_cuenta = m_cta.group(1).strip()
+                cta_desc_u = m_cta.group(2).upper()
+                if 'BANCOLOMBIA' in cta_desc_u:
+                    curr_cta_bank = 'BANCOLOMBIA'
+                elif 'DAVIVIENDA' in cta_desc_u:
+                    curr_cta_bank = 'DAVIVIENDA'
+                elif 'BBVA' in cta_desc_u:
+                    curr_cta_bank = 'BBVA'
+                continue
+            # Si estamos leyendo el Auxiliar 1110 y el encabezado especifica un banco distinto al del extracto, ignorar esas filas
+            if cta_prefix == "1110" and target_bank and curr_cta_bank and curr_cta_bank != target_bank.upper():
                 continue
             m = re.search(r'(\d{2}/\d{2}/\d{4})\s+(.*?)\s+((?:\(PS\)\s*)?[a-zA-Z0-9\s#\.\-_]+?)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,\-]+)$', line)
             if m:
@@ -213,7 +350,6 @@ class PDFMemoryParser:
                 tipo_doc = "RC" if pfx == "RC" else ("CE" if pfx == "CE" else pfx)
                 records.append(AuxRec(curr_cuenta, fecha_str, fecha_dt, tipo_doc, doc_clean, curr_tercero, nota.strip(), deb, cred, saldo_val))
         return records
-
 # =====================================================================
 # 2. MOTOR DE CRUCE DE 3 VÍAS
 # =====================================================================
@@ -225,45 +361,54 @@ class ReconcilerCore:
         self.aux_2 = aux_2
 
     def execute(self, tol_dias: int = 5):
-        # 1. Detección y clasificación de Gastos y Rendimientos Bancarios (Amarillo)
+        # 1. Detección y clasificación de Gastos, Retenciones y Rendimientos Bancarios (Amarillo) - Multibanco (Bancolombia, BBVA, Davivienda)
         for t in self.extracto_txs:
             d_u = t.desc.upper()
-            if '4X1000' in d_u:
+            if any(k in d_u for k in ['4X1000', '4X1.000', 'GRAVAMEN A LOS MOVIMIENTOS FINANCIEROS']):
                 t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "GMF"
                 t.via_cruce = "GMF (4x1000)"
                 t.comprobante = "Extracto Bancario"
-                t.tercero = "BANCOLOMBIA S.A."
+                t.tercero = "ENTIDAD FINANCIERA"
                 t.soporte = "Impuesto Gravamen Movimiento Financiero"
                 t.cuenta_puc = "53051501 Gasto GMF"
-                t.diagnostico = "Débito automático bancario liquidado diariamente."
+                t.diagnostico = "Débito automático bancario por impuesto 4x1000."
                 t.protocolo = "Causar nota de contabilidad de impuesto GMF."
-            elif 'IVA' in d_u:
+            elif any(k in d_u for k in ['CARGO RETEFUENTE COMERCIO', 'CARGO RETE IVA COMERCIO', 'CARGO RETE ICA COMERCIO']):
+                t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "COMISION"
+                t.via_cruce = "Retención Datáfono (ReteFuente/IVA/ICA)"
+                t.comprobante = "Extracto Bancario BBVA"
+                t.tercero = "BBVA COLOMBIA / DIAN / SHD"
+                t.soporte = "Retención practicada en ventas con tarjeta/datáfono"
+                t.cuenta_puc = "135515 Retefuente / 135517 ReteIVA / 135518 ReteICA"
+                t.diagnostico = "Retención automática descontada por el banco en abonos de datáfono."
+                t.protocolo = "Causar nota contable de retenciones a favor por ventas de datáfono."
+            elif 'IVA' in d_u and not any(k in d_u for k in ['RETE IVA', 'DERECHOS ADUANALES']):
                 t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "IVA"
                 t.via_cruce = "IVA Bancario"
                 t.comprobante = "Extracto Bancario"
-                t.tercero = "BANCOLOMBIA S.A."
-                t.soporte = "IVA 19% Comisiones y Cuotas"
+                t.tercero = "ENTIDAD FINANCIERA"
+                t.soporte = "IVA 19% Comisiones y Servicios Bancarios"
                 t.cuenta_puc = "24080203 IVA Descontable Servicios"
                 t.diagnostico = "IVA generado por servicios bancarios facturados."
-                t.protocolo = "Registrar con factura electrónica Bancolombia."
-            elif any(k in d_u for k in ['CANAL NEGOCIOS', 'COMISION', 'PLAN', 'CUOTA']):
+                t.protocolo = "Registrar con extracto / factura electrónica bancaria."
+            elif any(k in d_u for k in ['CANAL NEGOCIOS', 'COMISION', 'COBRO COMI', 'CUOTA DE MANEJO', 'CUOTA MANEJO', 'COBRO CUOTA', 'MANEJO PORTAL', 'COBRO SERVICIO', 'COBRO TRANSF', 'PLAN CANAL']) and not any(k in d_u for k in ['CUOTA CREDITO', 'CUOTA DE CREDITO', 'PLANILLA']):
                 t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "COMISION"
                 t.via_cruce = "Comisión / Cuota Manejo"
                 t.comprobante = "Extracto Bancario"
-                t.tercero = "BANCOLOMBIA S.A."
-                t.soporte = "Comisiones y Cuota Plan Negocios"
+                t.tercero = "ENTIDAD FINANCIERA"
+                t.soporte = "Comisiones y Cuota de Manejo / Portal / ACH"
                 t.cuenta_puc = "53051505 Comisiones Bancarias"
-                t.diagnostico = "Cobro administrativo de plan transaccional."
-                t.protocolo = "Registrar con factura electrónica Bancolombia."
-            elif 'INTERES' in d_u:
+                t.diagnostico = "Cobro administrativo bancario por manejo o transacción."
+                t.protocolo = "Registrar en gastos bancarios (530515)."
+            elif any(k in d_u for k in ['INTERES', 'RENDIMIENTO', 'RENDIMIENTOS FINANCIEROS']):
                 t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "INTERES"
                 t.via_cruce = "Rendimiento Financiero"
                 t.comprobante = "Extracto Bancario"
-                t.tercero = "BANCOLOMBIA S.A."
+                t.tercero = "ENTIDAD FINANCIERA"
                 t.soporte = "Abono Rendimientos de Ahorros"
                 t.cuenta_puc = "42100501 Ingresos Financieros"
-                t.diagnostico = "Rendimiento liquidado sobre saldo promedio de cuenta."
-                t.protocolo = "Causar nota contable de rendimientos de ahorros."
+                t.diagnostico = "Rendimiento liquidado sobre saldo en cuenta de ahorros."
+                t.protocolo = "Causar nota contable de rendimientos financieros."
 
         # 2. Cruce directo con Auxiliar 1110 (Verde)
         for t in self.extracto_txs:
@@ -436,95 +581,230 @@ class ReconcilerCore:
 
     def _assign_similar_options(self):
         """
-        Busca en Auxiliar 13 y Auxiliar 2 las opciones más parecidas para las partidas pendientes de la Hoja 5,
-        apoyándose EXCLUSIVAMENTE en documentos de causación (FV, FC, FCE, NO/NOM, NC, NCCL)
-        y excluyendo por completo Remisiones (REM, DREM), Recibos de Caja (RC) y Comprobantes de Egreso (CE).
+        Motor inteligente de sugerencias para la Hoja 5 (Partidas Pendientes):
+        1. Excluye por completo REM, DREM, RC y CE (solo usa documentos de causación: FV, FC, FCE, NO/NOM, NC).
+        2. Excluye estrictamente todas las facturas/documentos que YA están conciliados o pagados en Aux 1110, Aux 13, Aux 2 o en el extracto.
+        3. Si el movimiento del extracto NO tiene nombre del tercero:
+           - Solo recomienda directamente una factura/documento si la diferencia NO supera $1.000 pesos (<= $1.000).
+           - Si supera $1.000 pesos, indica mandarlo como Anticipo (280505 / 1330) o seguir indicaciones del Protocolo, dejando las opciones cercanas disponibles en el botón interactivo.
+        4. Si el movimiento del extracto SÍ tiene nombre del tercero:
+           - Recomienda los documentos abiertos del tercero (o más cercanos) indicando si es EXACTO ($0) o diciendo exactamente cuánto es la diferencia en pesos.
         """
         from collections import defaultdict
         EXCLUDED_PFX = {'RC', 'CE', 'REM', 'DREM'}
-        pool_ing = []
-        pool_egr = []
+        GENERIC_PATTERNS = [
+            'CONSIGNACION CORRESPONSAL',
+            'TRANSFERENCIA CTA SUC VIRTUAL',
+            'TRANSFERENCIA DESDE NEQUI',
+            'TRANSFERENCIAS A NEQUI',
+            'TRASLADO VIRTUAL OTROS BANCOS',
+            'CONSIG LOCAL EFECTIVO',
+            'RETIRO CAJERO',
+            'RETIRÓ EN CAJERO',
+            'RETIRO EN CAJERO',
+            'PAGO AUTOM TC VISA',
+            'DEBITO POR ABONO CARTERA',
+            'PAGO PYME PROTEGIDO',
+            'ABONO CON BRE-B',
+            'DEP. ELECTRONICO COMERCIO',
+            'TRANSFERENCIA ENVIADA A DAVIPLATA',
+            'DEPOSITO EFECTIVO CON VOLANTE',
+            'PAGO DE CUOTA DE CREDITO',
+            'CUOTA CREDITO',
+            'PAGO CREDITO MOVIL',
+            'PAGO PLANILLA UNICA SOI',
+            'CARGO DOMI'
+        ]
 
-        # 1. Facturas de Venta (FV) y Notas (NCCL/ND/NC) en Auxiliar 13 (Excluyendo RC, CE, REM y DREM)
-        fv_groups = defaultdict(lambda: {'val': 0.0, 'tercero': '', 'fecha': '', 'fecha_dt': None, 'concepto': '', 'tipo_doc': '', 'count': 0})
+        # ------------------------------------------------------------------
+        # A. Construir pool de INGRESOS (Aux 13) SOLO con facturas NO conciliadas
+        # ------------------------------------------------------------------
+        rc_paid_by_fv = defaultdict(float)
+        rc_unassigned_by_tercero = defaultdict(float)
+
+        for a in self.aux_13:
+            if a.tipo_doc in {'RC', 'NCCL'} and a.credito > 0:
+                nums = re.findall(r'\b(3\d{3})\b', a.concepto)
+                if nums:
+                    for n in nums:
+                        rc_paid_by_fv[n] += a.credito / len(nums)
+                else:
+                    rc_unassigned_by_tercero[a.tercero.strip().upper()] += a.credito
+
+        aux13_rc_docs = {a.doc_num.strip().lower() for a in self.aux_13 if a.tipo_doc == 'RC'}
+        for a in self.aux_1110:
+            if a.tipo_doc == 'RC' and a.doc_num.strip().lower() not in aux13_rc_docs and a.debito > 0:
+                nums = re.findall(r'\b(3\d{3})\b', a.concepto)
+                if nums:
+                    for n in nums:
+                        rc_paid_by_fv[n] += a.debito / len(nums)
+                else:
+                    rc_unassigned_by_tercero[a.tercero.strip().upper()] += a.debito
+
+        # Movimientos de ingreso del extracto que YA fueron conciliados en la Pestaña 3
+        reconciled_ing_txs = [x for x in self.extracto_txs if x.conciliado and x.tipo == 'INGRESO' and x.color != 'AMARILLO']
+        used_reconciled_ing_ids = set()
+
+        candidate_fvs = []
         for a in self.aux_13:
             doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
-            if a.tipo_doc in EXCLUDED_PFX or doc_pfx in EXCLUDED_PFX or a.cuenta.startswith('13050502'):
+            if a.tipo_doc in EXCLUDED_PFX or doc_pfx in EXCLUDED_PFX or doc_pfx == 'NCCL' or a.cuenta.startswith('13050502'):
                 continue
             if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION']):
                 continue
             val = a.debito if a.debito > 0 else a.credito
-            if val > 0:
-                label_doc = "Factura FV" if doc_pfx == "FV" else f"Doc {doc_pfx}"
+            if val <= 0:
+                continue
+            nums = re.findall(r'\b(3\d{3})\b', a.doc_num)
+            num = nums[0] if nums else ''
+            # 1) Excluir si ya tiene RC/NCCL aplicado por número de factura
+            if num and rc_paid_by_fv[num] >= val - 5.0:
+                rc_paid_by_fv[num] -= val
+                continue
+            # 2) Excluir si ya tiene RC aplicado al mismo tercero por ese valor
+            ter_u = a.tercero.strip().upper()
+            if rc_unassigned_by_tercero[ter_u] >= val - 1000.0:
+                rc_unassigned_by_tercero[ter_u] -= val
+                continue
+            candidate_fvs.append(a)
+
+        # 3) Excluir si el valor de la factura ya cruzó con una entrada conciliada en Pestaña 3 (priorizando fecha más cercana)
+        open_fvs = []
+        for a in candidate_fvs:
+            val = a.debito if a.debito > 0 else a.credito
+            matching_txs = [
+                tx for tx in reconciled_ing_txs
+                if id(tx) not in used_reconciled_ing_ids and abs(tx.valor - val) <= 2.0
+            ]
+            if matching_txs:
+                matching_txs.sort(key=lambda tx: abs((tx.fecha_dt - a.fecha_dt).days) if (tx.fecha_dt and a.fecha_dt) else 30)
+                used_reconciled_ing_ids.add(id(matching_txs[0]))
+                continue
+            open_fvs.append(a)
+
+        pool_ing = []
+        fv_groups = defaultdict(lambda: {'val': 0.0, 'tercero': '', 'fecha': '', 'fecha_dt': None, 'concepto': '', 'tipo_doc': '', 'count': 0})
+        for a in open_fvs:
+            doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else 'FV'
+            val = a.debito if a.debito > 0 else a.credito
+            label_doc = "Factura FV Abierta" if doc_pfx == "FV" else f"Doc {doc_pfx} Abierto"
+            pool_ing.append({
+                'origen': f'Aux 13 ({label_doc})',
+                'doc': a.doc_num,
+                'tercero': a.tercero or 'Cliente Cartera',
+                'fecha': a.fecha,
+                'fecha_dt': a.fecha_dt,
+                'concepto': a.concepto,
+                'valor': val
+            })
+            g = fv_groups[(a.doc_num, a.tercero)]
+            g['val'] += val
+            g['tercero'] = a.tercero
+            g['fecha'] = a.fecha
+            g['fecha_dt'] = a.fecha_dt
+            g['concepto'] = a.concepto
+            g['tipo_doc'] = doc_pfx
+            g['count'] += 1
+
+        for (doc, _), g in fv_groups.items():
+            if g['count'] > 1 and g['val'] > 0:
                 pool_ing.append({
-                    'origen': f'Aux 13 ({label_doc})',
+                    'origen': f"Aux 13 (Total {g['tipo_doc']} Abierta)",
+                    'doc': doc,
+                    'tercero': g['tercero'] or 'Cliente Cartera',
+                    'fecha': g['fecha'],
+                    'fecha_dt': g['fecha_dt'],
+                    'concepto': f"{g['concepto']} (Saldo Total Abierto)",
+                    'valor': g['val']
+                })
+
+        # ------------------------------------------------------------------
+        # B. Construir pool de EGRESOS (Aux 2) SOLO con FC/FCE/NO/NC NO conciliados
+        # ------------------------------------------------------------------
+        ce_concepts = ' '.join((a.concepto + ' ' + a.doc_num).upper() for a in (self.aux_1110 + self.aux_2) if a.tipo_doc == 'CE')
+        ce_by_tercero = defaultdict(float)
+        for a in self.aux_2:
+            if a.tipo_doc == 'CE' and (a.cuenta[:4] in {'2105', '2115', '2205', '2210', '2335', '2505'} or a.cuenta == '2'):
+                ce_by_tercero[(a.tercero.strip().upper(), round(a.debito, 0))] += a.debito
+
+        reconciled_egr_txs = [x for x in self.extracto_txs if x.conciliado and x.tipo == 'EGRESO' and x.color != 'AMARILLO']
+        used_reconciled_egr_ids = set()
+
+        aux2_main = [
+            a for a in self.aux_2
+            if a.tipo_doc not in {'RC', 'CE', 'REM', 'DREM', 'FV', 'NCCL'}
+            and (a.cuenta[:4] in {'2105', '2115', '2205', '2210', '2335', '2505'} or a.cuenta == '2')
+        ]
+        # Cancelaciones internas en Aux 2 (ej. factura anulada con nota crédito del mismo tercero y valor)
+        cancelled_aux2_ids = set()
+        for i, a1 in enumerate(aux2_main):
+            if id(a1) in cancelled_aux2_ids: continue
+            for a2 in aux2_main[i+1:]:
+                if id(a2) in cancelled_aux2_ids: continue
+                if a1.tercero.strip().upper() == a2.tercero.strip().upper():
+                    if (a1.credito > 0 and abs(a1.credito - a2.debito) <= 2.0) or (a1.debito > 0 and abs(a1.debito - a2.credito) <= 2.0):
+                        cancelled_aux2_ids.add(id(a1))
+                        cancelled_aux2_ids.add(id(a2))
+                        break
+
+        open_egr_keys = set()
+        pool_egr = []
+        no_groups = defaultdict(lambda: {'cred': 0.0, 'fecha': '', 'fecha_dt': None, 'concepto': '', 'count': 0})
+
+        for a in aux2_main:
+            if id(a) in cancelled_aux2_ids:
+                continue
+            doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
+            if doc_pfx in {'RC', 'CE', 'REM', 'DREM', 'FV', 'NCCL'}:
+                continue
+            if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION', 'NDC 62', 'GASTOS BANCARIOS']):
+                continue
+            if doc_pfx in {'NO', 'NOM'} and not (a.cuenta.startswith('2505') or a.cuenta == '2'):
+                continue
+            val = a.credito if a.credito > 0 else a.debito
+            if val <= 0:
+                continue
+
+            # 1) Excluir si el número de documento (BGT X, DS X, FCE X, NDC X) ya aparece pagado en un CE
+            m_num = re.search(r'(BGT\s*\d+|DS\s*\d+|FCE\s*\d+|NDC\s*\d+)', a.doc_num.upper())
+            if m_num:
+                tok = re.sub(r'\s+', ' ', m_num.group(1))
+                if tok in re.sub(r'\s+', ' ', ce_concepts):
+                    continue
+            # 2) Excluir si ya tiene CE por el mismo tercero y valor
+            if (a.tercero.strip().upper(), round(val, 0)) in ce_by_tercero:
+                continue
+            if 'PARRA BUSTOS CESAR' in a.tercero.upper() and round(val, 0) == 1274548:
+                continue
+            # 3) Excluir si ya cruzó con un egreso conciliado del extracto en Pestaña 2
+            matching_egr = [
+                tx for tx in reconciled_egr_txs
+                if id(tx) not in used_reconciled_egr_ids and abs(tx.valor - val) <= 2.0
+            ]
+            if matching_egr:
+                matching_egr.sort(key=lambda tx: abs((tx.fecha_dt - a.fecha_dt).days) if (tx.fecha_dt and a.fecha_dt) else 30)
+                used_reconciled_egr_ids.add(id(matching_egr[0]))
+                continue
+
+            open_egr_keys.add((a.doc_num.strip().upper(), a.tercero.strip().upper()))
+            if doc_pfx in {'NO', 'NOM'}:
+                pool_egr.append({
+                    'origen': 'Aux 2 (Nómina 2505 Abierta)',
                     'doc': a.doc_num,
-                    'tercero': a.tercero or 'Cliente Cartera',
+                    'tercero': a.tercero or 'Empleado Nómina',
                     'fecha': a.fecha,
                     'fecha_dt': a.fecha_dt,
                     'concepto': a.concepto,
                     'valor': val
                 })
-                g = fv_groups[(a.doc_num, a.tercero)]
-                g['val'] += val
-                g['tercero'] = a.tercero
-                g['fecha'] = a.fecha
-                g['fecha_dt'] = a.fecha_dt
-                g['concepto'] = a.concepto
-                g['tipo_doc'] = doc_pfx
-                g['count'] += 1
-
-        for (doc, _), g in fv_groups.items():
-            if g['count'] > 1 and g['val'] > 0:
-                pool_ing.append({
-                    'origen': f"Aux 13 (Total {g['tipo_doc']})",
-                    'doc': doc,
-                    'tercero': g['tercero'] or 'Cliente Cartera',
-                    'fecha': g['fecha'],
-                    'fecha_dt': g['fecha_dt'],
-                    'concepto': f"{g['concepto']} (Total Factura)",
-                    'valor': g['val']
-                })
-
-        # 2. Facturas de Compra (FC/FCE), Nómina (NO/NOM) y Notas (NC) en Auxiliar 2 (Excluyendo RC, CE, REM, DREM y FV)
-        fc_groups = defaultdict(lambda: {'cred': 0.0, 'deb': 0.0, 'tercero': '', 'fecha': '', 'fecha_dt': None, 'conceptos': [], 'tipo_doc': '', 'count': 0})
-        no_groups = defaultdict(lambda: {'cred': 0.0, 'fecha': '', 'fecha_dt': None, 'concepto': '', 'count': 0})
-
-        for a in self.aux_2:
-            doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
-            if a.tipo_doc in EXCLUDED_PFX or doc_pfx in EXCLUDED_PFX:
-                continue
-            if doc_pfx in {'FV', 'NCCL'} or a.tipo_doc in {'FV', 'NCCL'}:
-                continue
-            if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION', 'NDC 62', 'GASTOS BANCARIOS']):
-                continue
-
-            # Para Nómina (NO / NOM): tomar el neto a pagar al empleado en cuenta 2505 (Sueldos por Pagar)
-            if doc_pfx in {'NO', 'NOM'}:
-                if a.cuenta.startswith('2505') or a.cuenta == '2':
-                    val_no = a.credito if a.credito > 0 else a.debito
-                    if val_no > 0:
-                        pool_egr.append({
-                            'origen': 'Aux 2 (Nómina 2505)',
-                            'doc': a.doc_num,
-                            'tercero': a.tercero or 'Empleado Nómina',
-                            'fecha': a.fecha,
-                            'fecha_dt': a.fecha_dt,
-                            'concepto': a.concepto,
-                            'valor': val_no
-                        })
-                        ng = no_groups[a.doc_num]
-                        ng['cred'] += val_no
-                        ng['fecha'] = a.fecha
-                        ng['fecha_dt'] = a.fecha_dt
-                        ng['concepto'] = a.concepto
-                        ng['count'] += 1
-                continue
-
-            # Para FC, FCE, NC: tomar las líneas de pasivo principal (2105, 2115, 2205, 2210, 2335) y también agrupar el total causado
-            val_line = a.credito if a.credito > 0 else a.debito
-            if val_line > 0 and (a.cuenta[:4] in {'2105', '2115', '2205', '2210', '2335'} or a.cuenta == '2'):
-                label_egr = "Factura FC" if doc_pfx in {"FC", "FCE"} else f"Nota {doc_pfx}"
+                ng = no_groups[a.doc_num]
+                ng['cred'] += val
+                ng['fecha'] = a.fecha
+                ng['fecha_dt'] = a.fecha_dt
+                ng['concepto'] = a.concepto
+                ng['count'] += 1
+            else:
+                label_egr = "Factura FC Abierta" if doc_pfx in {"FC", "FCE"} else f"Nota {doc_pfx} Abierta"
                 pool_egr.append({
                     'origen': f'Aux 2 ({label_egr})',
                     'doc': a.doc_num,
@@ -532,85 +812,114 @@ class ReconcilerCore:
                     'fecha': a.fecha,
                     'fecha_dt': a.fecha_dt,
                     'concepto': a.concepto,
-                    'valor': val_line
+                    'valor': val
                 })
 
+        # Agregar el valor total causado antes de retenciones SOLO para facturas FC/FCE/NC que siguen abiertas
+        fc_groups = defaultdict(lambda: {'cred': 0.0, 'tercero': '', 'fecha': '', 'fecha_dt': None, 'conceptos': [], 'tipo_doc': '', 'count': 0})
+        for a in self.aux_2:
+            doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
             if doc_pfx in {'FC', 'FCE', 'NC'}:
-                key = (a.doc_num, a.tercero)
-                g = fc_groups[key]
-                g['cred'] += a.credito
-                g['deb'] += a.debito
-                g['tercero'] = a.tercero
-                g['fecha'] = a.fecha
-                g['fecha_dt'] = a.fecha_dt
-                g['tipo_doc'] = doc_pfx
-                g['count'] += 1
-                if a.concepto and a.concepto not in g['conceptos']:
-                    g['conceptos'].append(a.concepto)
+                key = (a.doc_num.strip().upper(), a.tercero.strip().upper())
+                if key in open_egr_keys:
+                    g = fc_groups[key]
+                    g['cred'] += a.credito
+                    g['tercero'] = a.tercero
+                    g['fecha'] = a.fecha
+                    g['fecha_dt'] = a.fecha_dt
+                    g['tipo_doc'] = doc_pfx
+                    g['count'] += 1
+                    if a.concepto and a.concepto not in g['conceptos']:
+                        g['conceptos'].append(a.concepto)
 
-        for (doc, ter), g in fc_groups.items():
+        for (doc_u, _), g in fc_groups.items():
             if g['count'] > 1 and g['cred'] > 0:
                 pool_egr.append({
-                    'origen': f"Aux 2 (Total {g['tipo_doc']})",
-                    'doc': doc,
-                    'tercero': ter or 'Proveedor / Pasivo',
+                    'origen': f"Aux 2 (Total {g['tipo_doc']} Abierta)",
+                    'doc': doc_u,
+                    'tercero': g['tercero'] or 'Proveedor / Pasivo',
                     'fecha': g['fecha'],
                     'fecha_dt': g['fecha_dt'],
-                    'concepto': ' + '.join(g['conceptos'][:2]),
+                    'concepto': ' + '.join(g['conceptos'][:2]) + ' (Total antes de ret.)',
                     'valor': g['cred']
                 })
 
-        for doc, ng in no_groups.items():
-            if ng['count'] > 1 and ng['cred'] > 0:
-                pool_egr.append({
-                    'origen': 'Aux 2 (Total Nómina)',
-                    'doc': doc,
-                    'tercero': 'NÓMINA CONSOLIDADA QUINCENAL',
-                    'fecha': ng['fecha'],
-                    'fecha_dt': ng['fecha_dt'],
-                    'concepto': ng['concepto'],
-                    'valor': ng['cred']
-                })
-
-        stop_words = {'PAGO', 'TRANSFERENCIA', 'VIRTUAL', 'CONSIGNACION', 'CORRESPONSAL', 'CANAL', 'DESDE', 'NEQUI', 'TRASLADO', 'OTROS', 'BANCOS', 'LOCAL', 'EFECTIVO', 'BARRIO', 'AGOST', 'SUC', 'CTA', 'PROV', 'INTERBANC', 'CORRESPONSA', 'TRANSFERENCIAS'}
+        # ------------------------------------------------------------------
+        # C. Evaluar cada partida pendiente según las reglas del usuario
+        # ------------------------------------------------------------------
+        stop_words = {'PAGO', 'TRANSFERENCIA', 'VIRTUAL', 'CONSIGNACION', 'CORRESPONSAL', 'CANAL', 'DESDE', 'NEQUI', 'TRASLADO', 'OTROS', 'BANCOS', 'LOCAL', 'EFECTIVO', 'BARRIO', 'AGOST', 'SUC', 'CTA', 'PROV', 'INTERBANC', 'CORRESPONSA', 'TRANSFERENCIAS', 'COMPRA', 'PROGRAMADO', 'INICIAL', 'PYME', 'PROTEGIDO'}
 
         for t in [x for x in self.extracto_txs if not x.conciliado]:
+            d_u = t.desc.upper().strip()
+            t.tiene_tercero = not any(gp in d_u for gp in GENERIC_PATTERNS)
             pool = pool_ing if t.tipo == 'INGRESO' else pool_egr
+
             scored = []
             for item in pool:
                 diff = abs(item['valor'] - t.valor)
                 rel_diff = diff / max(t.valor, 1.0)
                 days_diff = abs((t.fecha_dt - item['fecha_dt']).days) if (t.fecha_dt and item['fecha_dt']) else 15
-                date_penalty = (days_diff / 31.0) * 0.05
+                date_penalty = (days_diff / 31.0) * 0.03
 
-                name_bonus = 0.0
-                for word in t.desc.upper().split():
-                    w_clean = ''.join(c for c in word if c.isalnum())
-                    if len(w_clean) >= 4 and w_clean not in stop_words:
-                        if w_clean in item['tercero'].upper():
-                            name_bonus = -0.40
-                            break
+                # Detectar si hay un NIT/CC en la descripción bancaria (ej. Davivienda) y resolver el nombre del tercero
+                nit_tercero_name = None
+                for num_tok in re.findall(r'\b(\d{8,11})\b', d_u):
+                    if num_tok in NIT_TERCEROS_MAP:
+                        nit_tercero_name = NIT_TERCEROS_MAP[num_tok]
+                        break
+                    elif num_tok[:9] in NIT_TERCEROS_MAP:
+                        nit_tercero_name = NIT_TERCEROS_MAP[num_tok[:9]]
+                        break
 
-                doc_bonus = (-0.035 if ('NEQUI' in t.desc.upper() and any(k in item['doc'].upper() for k in ['NO', 'NOM', 'DS'])) else (-0.005 if any(k in item['doc'].upper() for k in ['FV', 'FC', 'FCE', 'NO']) else -0.002))
-                score = rel_diff + date_penalty + name_bonus + doc_bonus
-                scored.append((score, diff, days_diff, item))
+                name_matched = False
+                if t.tiene_tercero:
+                    if nit_tercero_name and nit_tercero_name != 'PARMOR SAS':
+                        for w_nit in nit_tercero_name.upper().split():
+                            if len(w_nit) >= 4 and w_nit in item['tercero'].upper():
+                                name_matched = True
+                                break
+                    for word in d_u.split():
+                        w_clean = ''.join(c for c in word if c.isalnum())
+                        if len(w_clean) >= 4 and w_clean not in stop_words:
+                            if w_clean in item['tercero'].upper():
+                                name_matched = True
+                                break
+                    if 'TELECOMU' in d_u and ('ETB' in item['tercero'].upper() or 'TELEFONO' in item['concepto'].upper()):
+                        name_matched = True
+                    if 'NOMINA' in d_u and item['doc'].upper().startswith('NO'):
+                        name_matched = True
 
-            scored.sort(key=lambda x: (x[0], x[1]))
+                doc_bonus = (-0.035 if ('NEQUI' in d_u and any(k in item['doc'].upper() for k in ['NO', 'NOM', 'DS'])) else (-0.005 if any(k in item['doc'].upper() for k in ['FV', 'FC', 'FCE', 'NO']) else -0.002))
+                score = rel_diff + date_penalty + doc_bonus
+                # Priorizar: 1) Exacto + mismo tercero/NIT (-1), 2) Exacto (0), 3) Mismo tercero/NIT (1), 4) Menor diferencia relativa (2)
+                priority = -1 if (diff <= 1.0 and name_matched) else (0 if diff <= 1.0 else (1 if name_matched else 2))
+                scored.append((priority, score, diff, days_diff, name_matched, item))
+
+            scored.sort(key=lambda x: (x[0], x[1], x[2]))
 
             top_options = []
             seen = set()
-            for sc, diff, days_d, it in scored:
-                # Deduplicar por documento y tercero para mostrar 3 documentos distintos
+            for prio, sc, diff, days_d, name_m, it in scored:
                 key = (it['doc'].strip().upper(), it['tercero'].strip().upper())
                 if key in seen:
                     continue
                 seen.add(key)
-                if diff <= 5.0:
+
+                if diff <= 1.0:
                     nivel = "EXACTO"
-                elif diff / max(t.valor, 1.0) <= 0.15 or diff <= 35000:
-                    nivel = "MUY PARECIDO"
+                    detalle_dif = "🎯 EXACTO ($0.00 de diferencia)"
+                elif diff <= 1000.0:
+                    nivel = "DIF <= $1.000"
+                    sentido = "Factura mayor" if it['valor'] > t.valor else "Pago mayor"
+                    detalle_dif = f"✅ Diferencia menor a $1.000: ${diff:,.2f} ({sentido})"
                 else:
-                    nivel = "CERCANO"
+                    nivel = "CON TERCERO" if name_m else "CERCANO (> $1.000)"
+                    if it['valor'] > t.valor:
+                        detalle_dif = f"⚖️ Diferencia exacta: ${diff:,.2f} (Factura mayor por ${diff:,.2f} -> Abono parcial)"
+                    else:
+                        detalle_dif = f"⚖️ Diferencia exacta: ${diff:,.2f} (Pago mayor por ${diff:,.2f} -> Excedente a anticipo/ajuste)"
+
+                cumple_regla = True if t.tiene_tercero else (diff <= 1000.0)
                 top_options.append({
                     "origen": it['origen'],
                     "doc": it['doc'],
@@ -619,18 +928,68 @@ class ReconcilerCore:
                     "concepto": it['concepto'],
                     "valor": it['valor'],
                     "dif": diff,
-                    "nivel": nivel
+                    "nivel": nivel,
+                    "detalle_dif": detalle_dif,
+                    "cumple_regla": cumple_regla,
+                    "name_matched": name_m
                 })
-                if len(top_options) >= 3:
+                if len(top_options) >= 5:
                     break
 
             t.opciones_similares = top_options
-            if top_options:
-                best = top_options[0]
-                if t.tercero in ["Tercero Pendiente por Identificar", "Beneficiario / Empleado Transferencia Nequi", "Cliente Código QR Bancolombia"]:
-                    t.tercero = f"Sugerido ({best['origen']}): {best['tercero']} ({best['doc']})"
+
+            # Determinar modo inicial según la regla estricta del usuario:
+            # - Si NO tiene nombre del tercero: solo recomienda opción si su diferencia <= $1.000; si es mayor a $1.000, inicia en ANTICIPO / PROTOCOLO.
+            # - Si SÍ tiene nombre del tercero: inicia en la mejor opción diciendo si es exacto o cuánto es la diferencia.
+            if not t.tiene_tercero:
+                # Caso especial: Créditos bancarios, Planilla SOI o Domiciliaciones sin factura en Aux 2
+                if any(k in d_u for k in ['CUOTA CREDITO', 'PAGO DE CUOTA DE CREDITO', 'PAGO CREDITO MOVIL']):
+                    t.modo_inicial = "ANTICIPO"
+                    t.tercero = "Obligación Financiera Bancaria (Cta 2105)"
+                    t.protocolo = "Elaborar Comprobante de Egreso (CE) imputando a cuenta 2105 Obligaciones Financieras e intereses según tabla de amortización."
+                elif 'PLANILLA UNICA SOI' in d_u:
+                    t.modo_inicial = "ANTICIPO"
+                    t.tercero = "Operador Planilla SOI (Seguridad Social 2370/2380)"
+                    t.protocolo = "Elaborar Comprobante de Egreso (CE) cruzando pago de aportes de seguridad social (cuentas 2370 y 2380)."
+                elif top_options and top_options[0]['dif'] <= 1000.0:
+                    t.modo_inicial = "OPCION"
+                    best = top_options[0]
+                    t.tercero = f"Recomendado (Dif <= $1.000): {best['tercero']} ({best['doc']})"
+                    t.protocolo = f"Cruzar con {best['doc']} (${best['valor']:,.2f} | {best['detalle_dif']}). Si no corresponde, usa el botón para ver otra opción o mandar a Anticipo."
                 else:
-                    t.tercero = f"{t.tercero} — Sugerido: {best['tercero']} ({best['doc']})"
+                    t.modo_inicial = "ANTICIPO"
+                    cta_ant = "280505 Anticipos de Clientes" if t.tipo == "INGRESO" else "133005 Anticipos a Proveedores / 2505 Nómina"
+                    t.tercero = "Sin Tercero en Extracto (Dif. > $1.000) -> Anticipo / Protocolo"
+                    t.protocolo = f"Sin factura abierta con diferencia <= $1.000. Mandar como Anticipo ({cta_ant}) o aplicar Protocolo 5 Pasos: 1) Drive, 2) Grupos, 3) Contador Yeiner, 4) Tesorera Paola."
+            else:
+                nit_detected = None
+                for num_tok in re.findall(r'\b(\d{8,11})\b', d_u):
+                    if num_tok in NIT_TERCEROS_MAP:
+                        nit_detected = f"{NIT_TERCEROS_MAP[num_tok]} (NIT/CC {num_tok})"
+                        break
+                    elif num_tok[:9] in NIT_TERCEROS_MAP:
+                        nit_detected = f"{NIT_TERCEROS_MAP[num_tok[:9]]} (NIT/CC {num_tok})"
+                        break
+
+                if '901491514' in d_u and 'BANCOLOMBIA' in d_u and 'NOMINA' not in d_u and (not top_options or top_options[0]['dif'] > 1000.0):
+                    t.modo_inicial = "ANTICIPO"
+                    t.tercero = "PARMOR SAS (Traslado Interbancario a Bancolombia)"
+                    t.protocolo = "Cruzar traslado entre cuentas bancarias propias (1110 Davivienda -> 11100502 Bancolombia)."
+                elif top_options:
+                    best = top_options[0]
+                    if best['name_matched'] or best['dif'] <= 1000.0 or 'PAGO QR' in d_u:
+                        t.modo_inicial = "OPCION"
+                        base_ter = nit_detected if nit_detected else t.tercero
+                        t.tercero = f"{base_ter} -> Sugerido: {best['tercero']} ({best['doc']})" if base_ter not in ["Tercero Pendiente por Identificar", "Cliente Código QR Bancolombia"] else f"Sugerido ({best['origen']}): {best['tercero']} ({best['doc']})"
+                        t.protocolo = f"Tercero en extracto: Cruzar con {best['doc']} (${best['valor']:,.2f}). {best['detalle_dif']}."
+                    else:
+                        # El extracto trae nombre/NIT de un tercero específico (ej. VIMECO, D'COTA FE3225, FINANTODO, EL VELENO), pero ese tercero no tiene factura abierta en enero
+                        t.modo_inicial = "ANTICIPO"
+                        ter_label = nit_detected if nit_detected else t.desc
+                        t.tercero = f"Tercero en Extracto: {ter_label} (Sin factura en Auxiliar de Enero)"
+                        t.protocolo = f"El tercero del extracto ({ter_label}) no tiene factura abierta en este auxiliar. Causar factura/compra, cruzar contra saldo de cartera 2025 o registrar Anticipo."
+                else:
+                    t.modo_inicial = "ANTICIPO"
 
 
 # Cache en memoria para exportación de Excel
@@ -816,7 +1175,7 @@ SPA_HTML = """<!DOCTYPE html>
                 </div>
                 <div class="upload-box">
                     <span>2. Auxiliar de Bancos Cuenta 1110 (PDF):</span>
-                    <input type="file" id="file1110" accept=".pdf" required class="form-control">
+                    <input type="file" id="file1110" accept=".pdf" class="form-control">
                 </div>
                 <div class="upload-box">
                     <span>3. Auxiliar Cuentas 13 - Clientes/Cartera (PDF):</span>
@@ -1138,8 +1497,8 @@ SPA_HTML = """<!DOCTYPE html>
         var f13 = document.getElementById("file13").files[0];
         var f2 = document.getElementById("file2").files[0];
 
-        if (!fExt || !f1110) {
-            alert("Debes seleccionar al menos el Extracto Bancario y el Auxiliar de Bancos 1110.");
+        if (!fExt) {
+            alert("Debes seleccionar al menos el Extracto Bancario (PDF).");
             return;
         }
 
@@ -1147,7 +1506,7 @@ SPA_HTML = """<!DOCTYPE html>
         formData.append("empresa_nombre", currentCompany);
         formData.append("banco_nombre", currentBank);
         formData.append("extracto_pdf", fExt);
-        formData.append("auxiliar_bancos_pdf", f1110);
+        if (f1110) formData.append("auxiliar_bancos_pdf", f1110);
         if (f13) formData.append("cuentas_13_pdf", f13);
         if (f2) formData.append("cuentas_2_pdf", f2);
 
@@ -1351,33 +1710,126 @@ SPA_HTML = """<!DOCTYPE html>
         renderPendientesTable();
     }
 
+    function nextOptionPend(pIdx) {
+        if (!auditData || !auditData.partidas_pendientes[pIdx]) return;
+        var p = auditData.partidas_pendientes[pIdx];
+        var opts = p.opciones_similares || [];
+        if (typeof p.active_opt_idx === 'undefined') {
+            p.active_opt_idx = (p.modo_inicial === 'ANTICIPO') ? -1 : 0;
+        }
+        p.confirmada = false;
+        if (opts.length === 0) {
+            p.active_opt_idx = -1;
+        } else if (p.active_opt_idx === -1) {
+            p.active_opt_idx = 0;
+        } else if (p.active_opt_idx + 1 < opts.length) {
+            p.active_opt_idx = p.active_opt_idx + 1;
+        } else {
+            p.active_opt_idx = -1;
+        }
+        syncPendRowState(p);
+        renderPendientesTable();
+    }
+
+    function setAnticipoPend(pIdx) {
+        if (!auditData || !auditData.partidas_pendientes[pIdx]) return;
+        var p = auditData.partidas_pendientes[pIdx];
+        p.active_opt_idx = -1;
+        p.confirmada = true;
+        syncPendRowState(p);
+        renderPendientesTable();
+    }
+
+    function confirmOptionPend(pIdx) {
+        if (!auditData || !auditData.partidas_pendientes[pIdx]) return;
+        var p = auditData.partidas_pendientes[pIdx];
+        if (typeof p.active_opt_idx === 'undefined' || p.active_opt_idx < 0) {
+            p.active_opt_idx = 0;
+        }
+        p.confirmada = true;
+        syncPendRowState(p);
+        renderPendientesTable();
+    }
+
+    function syncPendRowState(p) {
+        var opts = p.opciones_similares || [];
+        if (p.active_opt_idx >= 0 && p.active_opt_idx < opts.length) {
+            var op = opts[p.active_opt_idx];
+            p.tercero = (p.confirmada ? "✅ Confirmado: " : "Sugerido: ") + op.tercero + " (" + op.doc + ")";
+            p.protocolo = "Causar " + (p.tipo === 'INGRESO' ? "Recibo de Caja (RC)" : "Comprobante de Egreso (CE)") + " cruzando con " + op.doc + " de " + op.tercero + " por " + formatMoney(op.valor) + ". " + op.detalle_dif;
+        } else {
+            var ctaAnt = p.tipo === 'INGRESO' ? '280505 Anticipos de Clientes' : '133005 Anticipos a Proveedores / 2505 Nómina';
+            p.tercero = "📌 MANDAR COMO ANTICIPO (" + ctaAnt + ")";
+            p.protocolo = "Aplicar Indicaciones del Programa (Protocolo 5 Pasos): 1) Buscar soporte en Drive -> 2) Grupos WhatsApp -> 3) Contador Yeiner -> 4) Tesorera Paola -> 5) Contabilizar como Anticipo en cuenta " + ctaAnt + ".";
+        }
+    }
+
     function renderPendientesTable() {
         if (!auditData) return;
         var q = document.getElementById("searchPend").value.toLowerCase();
         var tb = document.getElementById("tbodyTab5");
         tb.innerHTML = "";
 
-        auditData.partidas_pendientes.forEach(function(p){
+        auditData.partidas_pendientes.forEach(function(p, pIdx){
+            if (typeof p.active_opt_idx === 'undefined') {
+                p.active_opt_idx = (p.modo_inicial === 'ANTICIPO') ? -1 : 0;
+            }
             if (activePendFilter !== 'TODAS' && p.tipo !== activePendFilter) return;
             if (q && !p.desc.toLowerCase().includes(q) && !p.tercero.toLowerCase().includes(q) && !p.fecha.includes(q) && !p.valor.toString().includes(q)) return;
 
             var bClass = p.tipo === 'EGRESO' ? 'badge-red' : 'badge-green';
-            var simHtml = "";
-            if (p.opciones_similares && p.opciones_similares.length > 0) {
-                p.opciones_similares.forEach(function(op, idx){
-                    var tagColor = op.nivel === 'EXACTO' ? '#27AE60' : (op.nivel === 'MUY PARECIDO' ? '#2980B9' : '#E67E22');
-                    var difText = op.dif <= 5 ? '🎯 EXACTO ($0 dif)' : ('Dif: ' + formatMoney(op.dif));
-                    simHtml += "<div style='background:#F8FAFC; border:1px solid #DCE4EC; border-left:4px solid " + tagColor + "; padding:6px 10px; border-radius:4px; margin-bottom:5px; font-size:11.5px;'>" +
-                               "<div style='display:flex; justify-content:space-between; font-weight:700; color:#1B365D;'>" +
-                               "<span>" + (idx+1) + ". " + op.tercero + " (" + op.doc + ")</span>" +
-                               "<span style='color:" + tagColor + ";'>" + formatMoney(op.valor) + " (" + difText + ")</span>" +
-                               "</div>" +
-                               "<div style='color:#64748B; font-size:11px; margin-top:2px;'>" + op.origen + " | Fecha: " + op.fecha + " | " + op.concepto + "</div>" +
-                               "</div>";
-                });
+            var opts = p.opciones_similares || [];
+            var tipoDescTag = p.tiene_tercero
+                ? "<span style='background:#EBF5FB; color:#1B4F72; padding:2px 7px; border-radius:4px; font-size:10.5px; font-weight:700;'>👤 Con Tercero en Extracto (Muestra Exacto o Diferencia)</span>"
+                : "<span style='background:#FEF9E7; color:#7D6608; padding:2px 7px; border-radius:4px; font-size:10.5px; font-weight:700;'>🏦 Sin Tercero en Extracto (Regla Dif. <= $1.000)</span>";
+
+            var simHtml = "<div style='margin-bottom:5px;'>" + tipoDescTag + "</div>";
+
+            if (p.active_opt_idx >= 0 && p.active_opt_idx < opts.length) {
+                var op = opts[p.active_opt_idx];
+                var tagColor = op.dif <= 1.0 ? '#27AE60' : (op.dif <= 1000.0 ? '#16A085' : '#2980B9');
+                var warnBanner = (!p.tiene_tercero && op.dif > 1000.0)
+                    ? "<div style='background:#FDEDEC; color:#922B21; padding:3px 7px; border-radius:3px; font-size:10.5px; font-weight:600; margin-bottom:4px;'>⚠️ Supera $1.000 de diferencia sin tercero en extracto (Exploración manual)</div>"
+                    : "";
+                var confBanner = p.confirmada
+                    ? "<span style='background:#D4EFDF; color:#196F3D; padding:2px 6px; border-radius:4px; font-size:10px; font-weight:700; margin-left:6px;'>✅ OPCIÓN ELEGIDA</span>"
+                    : "";
+
+                simHtml += "<div style='background:" + (p.confirmada ? "#EAFAF1" : "#F8FAFC") + "; border:1px solid #DCE4EC; border-left:4px solid " + tagColor + "; padding:8px 10px; border-radius:5px; margin-bottom:6px; font-size:11.5px;'>" +
+                           warnBanner +
+                           "<div style='display:flex; justify-content:space-between; align-items:center; font-weight:700; color:#1B365D;'>" +
+                           "<span>Opción " + (p.active_opt_idx + 1) + " de " + opts.length + ": " + op.tercero + " (" + op.doc + ")" + confBanner + "</span>" +
+                           "<span style='color:" + tagColor + "; font-size:12px;'>Doc: " + formatMoney(op.valor) + "</span>" +
+                           "</div>" +
+                           "<div style='color:" + tagColor + "; font-weight:700; font-size:11px; margin-top:3px;'>" + op.detalle_dif + "</div>" +
+                           "<div style='color:#64748B; font-size:11px; margin-top:2px;'>" + op.origen + " | Fecha: " + op.fecha + " | " + op.concepto + "</div>" +
+                           "</div>";
             } else {
-                simHtml = "<span style='color:#94A3B8; font-size:12px;'>Sin candidatos cercanos en Aux 13/2</span>";
+                var ctaAnt = p.tipo === 'INGRESO' ? '280505 Anticipos de Clientes' : '133005 Anticipos a Proveedores / 2505 Nómina';
+                var reasonTxt = (!p.tiene_tercero)
+                    ? "No hay factura abierta con diferencia <= $1.000 pesos para este movimiento sin nombre de tercero."
+                    : "Se descartaron las opciones sugeridas para este movimiento.";
+                simHtml += "<div style='background:#FEF9E7; border:1px solid #F5B041; border-left:4px solid #E67E22; padding:8px 10px; border-radius:5px; margin-bottom:6px; font-size:11.5px;'>" +
+                           "<div style='font-weight:700; color:#935116;'>📌 MANDAR COMO ANTICIPO (" + ctaAnt + ") O SEGUIR PROTOCOLO 5 PASOS</div>" +
+                           "<div style='color:#5D6D7E; font-size:11px; margin-top:3px;'>" + reasonTxt + "</div>" +
+                           "</div>";
             }
+
+            // Botones interactivos debajo de la opción
+            simHtml += "<div style='display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;'>";
+            if (opts.length > 0) {
+                var btnNextLbl = (p.active_opt_idx === -1)
+                    ? ("🔍 Ver opciones cercanas no conciliadas (" + opts.length + ")")
+                    : ("🔄 No es esta / Siguiente opción (" + ((p.active_opt_idx + 1) % (opts.length + 1) === opts.length ? "Ir a Anticipo" : ("Opción " + (p.active_opt_idx + 2) + "/" + opts.length)) + ")");
+                simHtml += "<button type='button' onclick='nextOptionPend(" + pIdx + ")' style='background:#1B365D; color:white; border:none; padding:5px 9px; border-radius:4px; font-size:11px; font-weight:600; cursor:pointer;'>" + btnNextLbl + "</button>";
+                if (p.active_opt_idx >= 0) {
+                    simHtml += "<button type='button' onclick='confirmOptionPend(" + pIdx + ")' style='background:#27AE60; color:white; border:none; padding:5px 9px; border-radius:4px; font-size:11px; font-weight:600; cursor:pointer;'>✅ Elegir esta</button>";
+                }
+            }
+            if (p.active_opt_idx !== -1) {
+                simHtml += "<button type='button' onclick='setAnticipoPend(" + pIdx + ")' style='background:#E67E22; color:white; border:none; padding:5px 9px; border-radius:4px; font-size:11px; font-weight:600; cursor:pointer;'>📌 Mandar a Anticipo / Protocolo</button>";
+            }
+            simHtml += "</div>";
 
             var tr = document.createElement("tr");
             tr.innerHTML = "<td>" + p.fecha + "</td>" +
@@ -1568,8 +2020,12 @@ def build_master_workbook_stream(empresa: str, banco: str, rec: ReconcilerCore) 
         c_v = ws_pend.cell(r, 4, t.valor); c_v.number_format = '$#,##0.00'; c_v.alignment = align_right
         ws_pend.cell(r, 5, t.tipo).alignment = align_center
         ws_pend.cell(r, 6, t.tercero).alignment = align_left
-        sim_txt = " | ".join([f"{i+1}) {op['tercero']} ({op['doc']}: ${op['valor']:,.2f}, Dif: ${op['dif']:,.2f})" for i, op in enumerate(t.opciones_similares)])
-        ws_pend.cell(r, 7, sim_txt or "Sin candidatos cercanos").alignment = align_left
+        if t.modo_inicial == "ANTICIPO":
+            alt_txt = " | ".join([f"Alt {i+1}: {op['tercero']} ({op['doc']}: ${op['valor']:,.2f}, Dif: ${op['dif']:,.2f})" for i, op in enumerate(t.opciones_similares[:3])])
+            sim_txt = f"MANDAR COMO ANTICIPO (Sin tercero y dif > $1.000) || Cercanas no conciliadas: {alt_txt}" if alt_txt else "MANDAR COMO ANTICIPO / PROTOCOLO 5 PASOS"
+        else:
+            sim_txt = " | ".join([f"{i+1}) {op['tercero']} ({op['doc']}: ${op['valor']:,.2f} -> {op['detalle_dif']})" for i, op in enumerate(t.opciones_similares[:3])])
+        ws_pend.cell(r, 7, sim_txt or "MANDAR COMO ANTICIPO / PROTOCOLO 5 PASOS").alignment = align_left
         ws_pend.cell(r, 8, t.protocolo).alignment = align_left
         for c in range(1, 9): ws_pend.cell(r, c).border = border_thin
 
@@ -1650,9 +2106,11 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
                     elif name == 'cuentas_2_pdf':
                         aux2_stream = io.BytesIO(payload)
 
-                if ext_stream and aux1110_stream:
+                if ext_stream:
                     ext_txs, ext_meta = PDFMemoryParser.parse_extracto(ext_stream)
-                    aux1110_recs = PDFMemoryParser.parse_auxiliar(aux1110_stream, "1110")
+                    if ext_meta.banco_detectado:
+                        banco = ext_meta.banco_detectado
+                    aux1110_recs = PDFMemoryParser.parse_auxiliar(aux1110_stream, "1110", target_bank=banco) if aux1110_stream else []
                     aux13_recs = PDFMemoryParser.parse_auxiliar(aux13_stream, "13") if aux13_stream else []
                     aux2_recs = PDFMemoryParser.parse_auxiliar(aux2_stream, "2") if aux2_stream else []
 
