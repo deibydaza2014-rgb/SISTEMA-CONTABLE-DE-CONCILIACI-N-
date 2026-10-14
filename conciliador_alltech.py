@@ -47,6 +47,7 @@ class BankTx:
         self.cuenta_puc = "1305 / 2335 / 2805"
         self.diagnostico = ""
         self.protocolo = "Aplicar Protocolo 5 Pasos (Drive -> Grupos -> Contador -> Tesorero -> Abono/Anticipo)"
+        self.opciones_similares = []
 
     def to_dict(self):
         return {
@@ -64,7 +65,8 @@ class BankTx:
             "soporte": self.soporte,
             "cuenta_puc": self.cuenta_puc,
             "diagnostico": self.diagnostico,
-            "protocolo": self.protocolo
+            "protocolo": self.protocolo,
+            "opciones_similares": self.opciones_similares
         }
 
 class AuxRec:
@@ -185,9 +187,14 @@ class PDFMemoryParser:
         text = cls.extract_text(stream)
         records = []
         curr_tercero = ""
+        curr_cuenta = cta_prefix
         for line in text.split('\n'):
             line_s = line.strip()
             if not line_s or 'SALDO INICIAL' in line_s or 'Total para' in line_s:
+                continue
+            m_cta = re.match(r'^\s*(\d{6,8})\s+([A-ZÁÉÍÓÚÑ0-9\s\.,\-\(\)%]+)$', line_s)
+            if m_cta and not re.search(r'\d{2}/\d{2}/\d{4}', line_s):
+                curr_cuenta = m_cta.group(1).strip()
                 continue
             m = re.search(r'(\d{2}/\d{2}/\d{4})\s+(.*?)\s+((?:\(PS\)\s*)?[a-zA-Z0-9\s#\.\-_]+?)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,\-]+)$', line)
             if m:
@@ -202,8 +209,9 @@ class PDFMemoryParser:
                 try: fecha_dt = datetime.date(int(parts[2]), int(parts[1]), int(parts[0]))
                 except (ValueError, IndexError): fecha_dt = None
                 doc_clean = doc_num.replace('(PS)', '').strip()
-                tipo_doc = "RC" if "rc" in doc_clean.lower() else ("CE" if "ce" in doc_clean.lower() else "DOC")
-                records.append(AuxRec(cta_prefix, fecha_str, fecha_dt, tipo_doc, doc_clean, curr_tercero, nota.strip(), deb, cred, saldo_val))
+                pfx = doc_clean.split()[0].upper() if doc_clean else "DOC"
+                tipo_doc = "RC" if pfx == "RC" else ("CE" if pfx == "CE" else pfx)
+                records.append(AuxRec(curr_cuenta, fecha_str, fecha_dt, tipo_doc, doc_clean, curr_tercero, nota.strip(), deb, cred, saldo_val))
         return records
 
 # =====================================================================
@@ -280,12 +288,18 @@ class ReconcilerCore:
                         a.conciliado = True
                         break
 
-        # 3. Subauxiliares (Azul)
-        # 3A. Salidas en Cuentas 2 (Proveedores / Nómina / Pasivos)
+        # 3. Subauxiliares (Azul) - Excluyendo estrictamente REM, DREM, RC y CE
+        EXCLUDED_DOCS = {'RC', 'CE', 'REM', 'DREM'}
+
+        # 3A. Salidas en Cuentas 2 (Proveedores / Nómina / Pasivos: solo FC, FCE, NO, NC)
         for t in [x for x in self.extracto_txs if not x.conciliado and x.tipo == 'EGRESO']:
             for a in self.aux_2:
                 if a.conciliado: continue
-                # En Cuentas 2, los débitos cancelan pasivos
+                doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
+                if a.tipo_doc in EXCLUDED_DOCS or doc_pfx in EXCLUDED_DOCS or a.cuenta.startswith('13050502'):
+                    continue
+                if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION']):
+                    continue
                 if abs(t.valor - a.debito) <= 2.0:
                     dias_dif = abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 0
                     if dias_dif <= tol_dias + 4:
@@ -300,12 +314,13 @@ class ReconcilerCore:
                         a.conciliado = True
                         break
 
-        # 3B. Entradas en Cuentas 13 (Deudores / Cartera)
+        # 3B. Entradas en Cuentas 13 (Deudores / Cartera: solo FV, NCCL, ND, NC)
         for t in [x for x in self.extracto_txs if not x.conciliado and x.tipo == 'INGRESO']:
             for a in self.aux_13:
                 if a.conciliado: continue
-                # En Cuentas 13, los créditos abonan a cartera
-                # Excluir Devoluciones de Remision (DREM) porque no representan dinero entrante al banco
+                doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
+                if a.tipo_doc in EXCLUDED_DOCS or doc_pfx in EXCLUDED_DOCS or a.cuenta.startswith('13050502'):
+                    continue
                 if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION']):
                     continue
                 if abs(t.valor - a.credito) <= 2.0:
@@ -315,7 +330,7 @@ class ReconcilerCore:
                         t.via_cruce = "Cruzado en Auxiliar Cuentas 13 (Clientes)"
                         t.comprobante = a.doc_num
                         t.tercero = a.tercero or "Cliente Nacional"
-                        t.soporte = a.concepto or "Factura de Venta / Remisión"
+                        t.soporte = a.concepto or "Factura de Venta"
                         t.cuenta_puc = "130505 Clientes / 2805 Anticipos"
                         t.diagnostico = "Recaudo causado en cartera de clientes según Factura de Venta; pendiente en Bancos."
                         t.protocolo = "Elaborar Recibo de Caja (RC) imputando a cuenta 11100502."
@@ -377,6 +392,8 @@ class ReconcilerCore:
                 t.diagnostico = "Operación sin registro contable previo en auxiliares."
                 t.protocolo = "Aplicar Protocolo 5 Pasos: 1) Drive, 2) Grupos, 3) Contador, 4) Tesorera, 5) Anticipo."
 
+        self._assign_similar_options()
+
         # 4B. Detectar partidas anuladas o reversadas internamente dentro del mismo Auxiliar 1110 (Débito vs Crédito igual)
         unmatched_1110 = [a for a in self.aux_1110 if not a.conciliado]
         for i, a1 in enumerate(unmatched_1110):
@@ -416,6 +433,205 @@ class ReconcilerCore:
                     else:
                         a.estado = "TRANSITO"
                         a.diagnostico = "Consignación o transferencia registrada en contabilidad no acreditada en banco."
+
+    def _assign_similar_options(self):
+        """
+        Busca en Auxiliar 13 y Auxiliar 2 las opciones más parecidas para las partidas pendientes de la Hoja 5,
+        apoyándose EXCLUSIVAMENTE en documentos de causación (FV, FC, FCE, NO/NOM, NC, NCCL)
+        y excluyendo por completo Remisiones (REM, DREM), Recibos de Caja (RC) y Comprobantes de Egreso (CE).
+        """
+        from collections import defaultdict
+        EXCLUDED_PFX = {'RC', 'CE', 'REM', 'DREM'}
+        pool_ing = []
+        pool_egr = []
+
+        # 1. Facturas de Venta (FV) y Notas (NCCL/ND/NC) en Auxiliar 13 (Excluyendo RC, CE, REM y DREM)
+        fv_groups = defaultdict(lambda: {'val': 0.0, 'tercero': '', 'fecha': '', 'fecha_dt': None, 'concepto': '', 'tipo_doc': '', 'count': 0})
+        for a in self.aux_13:
+            doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
+            if a.tipo_doc in EXCLUDED_PFX or doc_pfx in EXCLUDED_PFX or a.cuenta.startswith('13050502'):
+                continue
+            if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION']):
+                continue
+            val = a.debito if a.debito > 0 else a.credito
+            if val > 0:
+                label_doc = "Factura FV" if doc_pfx == "FV" else f"Doc {doc_pfx}"
+                pool_ing.append({
+                    'origen': f'Aux 13 ({label_doc})',
+                    'doc': a.doc_num,
+                    'tercero': a.tercero or 'Cliente Cartera',
+                    'fecha': a.fecha,
+                    'fecha_dt': a.fecha_dt,
+                    'concepto': a.concepto,
+                    'valor': val
+                })
+                g = fv_groups[(a.doc_num, a.tercero)]
+                g['val'] += val
+                g['tercero'] = a.tercero
+                g['fecha'] = a.fecha
+                g['fecha_dt'] = a.fecha_dt
+                g['concepto'] = a.concepto
+                g['tipo_doc'] = doc_pfx
+                g['count'] += 1
+
+        for (doc, _), g in fv_groups.items():
+            if g['count'] > 1 and g['val'] > 0:
+                pool_ing.append({
+                    'origen': f"Aux 13 (Total {g['tipo_doc']})",
+                    'doc': doc,
+                    'tercero': g['tercero'] or 'Cliente Cartera',
+                    'fecha': g['fecha'],
+                    'fecha_dt': g['fecha_dt'],
+                    'concepto': f"{g['concepto']} (Total Factura)",
+                    'valor': g['val']
+                })
+
+        # 2. Facturas de Compra (FC/FCE), Nómina (NO/NOM) y Notas (NC) en Auxiliar 2 (Excluyendo RC, CE, REM, DREM y FV)
+        fc_groups = defaultdict(lambda: {'cred': 0.0, 'deb': 0.0, 'tercero': '', 'fecha': '', 'fecha_dt': None, 'conceptos': [], 'tipo_doc': '', 'count': 0})
+        no_groups = defaultdict(lambda: {'cred': 0.0, 'fecha': '', 'fecha_dt': None, 'concepto': '', 'count': 0})
+
+        for a in self.aux_2:
+            doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
+            if a.tipo_doc in EXCLUDED_PFX or doc_pfx in EXCLUDED_PFX:
+                continue
+            if doc_pfx in {'FV', 'NCCL'} or a.tipo_doc in {'FV', 'NCCL'}:
+                continue
+            if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION', 'NDC 62', 'GASTOS BANCARIOS']):
+                continue
+
+            # Para Nómina (NO / NOM): tomar el neto a pagar al empleado en cuenta 2505 (Sueldos por Pagar)
+            if doc_pfx in {'NO', 'NOM'}:
+                if a.cuenta.startswith('2505') or a.cuenta == '2':
+                    val_no = a.credito if a.credito > 0 else a.debito
+                    if val_no > 0:
+                        pool_egr.append({
+                            'origen': 'Aux 2 (Nómina 2505)',
+                            'doc': a.doc_num,
+                            'tercero': a.tercero or 'Empleado Nómina',
+                            'fecha': a.fecha,
+                            'fecha_dt': a.fecha_dt,
+                            'concepto': a.concepto,
+                            'valor': val_no
+                        })
+                        ng = no_groups[a.doc_num]
+                        ng['cred'] += val_no
+                        ng['fecha'] = a.fecha
+                        ng['fecha_dt'] = a.fecha_dt
+                        ng['concepto'] = a.concepto
+                        ng['count'] += 1
+                continue
+
+            # Para FC, FCE, NC: tomar las líneas de pasivo principal (2105, 2115, 2205, 2210, 2335) y también agrupar el total causado
+            val_line = a.credito if a.credito > 0 else a.debito
+            if val_line > 0 and (a.cuenta[:4] in {'2105', '2115', '2205', '2210', '2335'} or a.cuenta == '2'):
+                label_egr = "Factura FC" if doc_pfx in {"FC", "FCE"} else f"Nota {doc_pfx}"
+                pool_egr.append({
+                    'origen': f'Aux 2 ({label_egr})',
+                    'doc': a.doc_num,
+                    'tercero': a.tercero or 'Proveedor / Pasivo',
+                    'fecha': a.fecha,
+                    'fecha_dt': a.fecha_dt,
+                    'concepto': a.concepto,
+                    'valor': val_line
+                })
+
+            if doc_pfx in {'FC', 'FCE', 'NC'}:
+                key = (a.doc_num, a.tercero)
+                g = fc_groups[key]
+                g['cred'] += a.credito
+                g['deb'] += a.debito
+                g['tercero'] = a.tercero
+                g['fecha'] = a.fecha
+                g['fecha_dt'] = a.fecha_dt
+                g['tipo_doc'] = doc_pfx
+                g['count'] += 1
+                if a.concepto and a.concepto not in g['conceptos']:
+                    g['conceptos'].append(a.concepto)
+
+        for (doc, ter), g in fc_groups.items():
+            if g['count'] > 1 and g['cred'] > 0:
+                pool_egr.append({
+                    'origen': f"Aux 2 (Total {g['tipo_doc']})",
+                    'doc': doc,
+                    'tercero': ter or 'Proveedor / Pasivo',
+                    'fecha': g['fecha'],
+                    'fecha_dt': g['fecha_dt'],
+                    'concepto': ' + '.join(g['conceptos'][:2]),
+                    'valor': g['cred']
+                })
+
+        for doc, ng in no_groups.items():
+            if ng['count'] > 1 and ng['cred'] > 0:
+                pool_egr.append({
+                    'origen': 'Aux 2 (Total Nómina)',
+                    'doc': doc,
+                    'tercero': 'NÓMINA CONSOLIDADA QUINCENAL',
+                    'fecha': ng['fecha'],
+                    'fecha_dt': ng['fecha_dt'],
+                    'concepto': ng['concepto'],
+                    'valor': ng['cred']
+                })
+
+        stop_words = {'PAGO', 'TRANSFERENCIA', 'VIRTUAL', 'CONSIGNACION', 'CORRESPONSAL', 'CANAL', 'DESDE', 'NEQUI', 'TRASLADO', 'OTROS', 'BANCOS', 'LOCAL', 'EFECTIVO', 'BARRIO', 'AGOST', 'SUC', 'CTA', 'PROV', 'INTERBANC', 'CORRESPONSA', 'TRANSFERENCIAS'}
+
+        for t in [x for x in self.extracto_txs if not x.conciliado]:
+            pool = pool_ing if t.tipo == 'INGRESO' else pool_egr
+            scored = []
+            for item in pool:
+                diff = abs(item['valor'] - t.valor)
+                rel_diff = diff / max(t.valor, 1.0)
+                days_diff = abs((t.fecha_dt - item['fecha_dt']).days) if (t.fecha_dt and item['fecha_dt']) else 15
+                date_penalty = (days_diff / 31.0) * 0.05
+
+                name_bonus = 0.0
+                for word in t.desc.upper().split():
+                    w_clean = ''.join(c for c in word if c.isalnum())
+                    if len(w_clean) >= 4 and w_clean not in stop_words:
+                        if w_clean in item['tercero'].upper():
+                            name_bonus = -0.40
+                            break
+
+                doc_bonus = (-0.035 if ('NEQUI' in t.desc.upper() and any(k in item['doc'].upper() for k in ['NO', 'NOM', 'DS'])) else (-0.005 if any(k in item['doc'].upper() for k in ['FV', 'FC', 'FCE', 'NO']) else -0.002))
+                score = rel_diff + date_penalty + name_bonus + doc_bonus
+                scored.append((score, diff, days_diff, item))
+
+            scored.sort(key=lambda x: (x[0], x[1]))
+
+            top_options = []
+            seen = set()
+            for sc, diff, days_d, it in scored:
+                # Deduplicar por documento y tercero para mostrar 3 documentos distintos
+                key = (it['doc'].strip().upper(), it['tercero'].strip().upper())
+                if key in seen:
+                    continue
+                seen.add(key)
+                if diff <= 5.0:
+                    nivel = "EXACTO"
+                elif diff / max(t.valor, 1.0) <= 0.15 or diff <= 35000:
+                    nivel = "MUY PARECIDO"
+                else:
+                    nivel = "CERCANO"
+                top_options.append({
+                    "origen": it['origen'],
+                    "doc": it['doc'],
+                    "tercero": it['tercero'],
+                    "fecha": it['fecha'],
+                    "concepto": it['concepto'],
+                    "valor": it['valor'],
+                    "dif": diff,
+                    "nivel": nivel
+                })
+                if len(top_options) >= 3:
+                    break
+
+            t.opciones_similares = top_options
+            if top_options:
+                best = top_options[0]
+                if t.tercero in ["Tercero Pendiente por Identificar", "Beneficiario / Empleado Transferencia Nequi", "Cliente Código QR Bancolombia"]:
+                    t.tercero = f"Sugerido ({best['origen']}): {best['tercero']} ({best['doc']})"
+                else:
+                    t.tercero = f"{t.tercero} — Sugerido: {best['tercero']} ({best['doc']})"
+
 
 # Cache en memoria para exportación de Excel
 SESSION_CACHE = {}
@@ -839,10 +1055,11 @@ SPA_HTML = """<!DOCTYPE html>
                         <tr>
                             <th>Fecha</th>
                             <th>Concepto en Extracto</th>
-                            <th style="text-align: right;">Valor</th>
+                            <th style="text-align: right;">Valor Extracto</th>
                             <th>Tipo</th>
-                            <th>Tercero Identificado / Sugerido</th>
-                            <th>Procedimiento de Investigación (Protocolo 5 Pasos)</th>
+                            <th>Tercero Sugerido</th>
+                            <th style="min-width: 360px;">Opciones Más Parecidas en Aux 13 y 2 (FV, FC, NOM, NC)</th>
+                            <th>Protocolo 5 Pasos</th>
                         </tr>
                     </thead>
                     <tbody id="tbodyTab5"></tbody>
@@ -1145,12 +1362,30 @@ SPA_HTML = """<!DOCTYPE html>
             if (q && !p.desc.toLowerCase().includes(q) && !p.tercero.toLowerCase().includes(q) && !p.fecha.includes(q) && !p.valor.toString().includes(q)) return;
 
             var bClass = p.tipo === 'EGRESO' ? 'badge-red' : 'badge-green';
+            var simHtml = "";
+            if (p.opciones_similares && p.opciones_similares.length > 0) {
+                p.opciones_similares.forEach(function(op, idx){
+                    var tagColor = op.nivel === 'EXACTO' ? '#27AE60' : (op.nivel === 'MUY PARECIDO' ? '#2980B9' : '#E67E22');
+                    var difText = op.dif <= 5 ? '🎯 EXACTO ($0 dif)' : ('Dif: ' + formatMoney(op.dif));
+                    simHtml += "<div style='background:#F8FAFC; border:1px solid #DCE4EC; border-left:4px solid " + tagColor + "; padding:6px 10px; border-radius:4px; margin-bottom:5px; font-size:11.5px;'>" +
+                               "<div style='display:flex; justify-content:space-between; font-weight:700; color:#1B365D;'>" +
+                               "<span>" + (idx+1) + ". " + op.tercero + " (" + op.doc + ")</span>" +
+                               "<span style='color:" + tagColor + ";'>" + formatMoney(op.valor) + " (" + difText + ")</span>" +
+                               "</div>" +
+                               "<div style='color:#64748B; font-size:11px; margin-top:2px;'>" + op.origen + " | Fecha: " + op.fecha + " | " + op.concepto + "</div>" +
+                               "</div>";
+                });
+            } else {
+                simHtml = "<span style='color:#94A3B8; font-size:12px;'>Sin candidatos cercanos en Aux 13/2</span>";
+            }
+
             var tr = document.createElement("tr");
             tr.innerHTML = "<td>" + p.fecha + "</td>" +
                            "<td>" + p.desc + "</td>" +
                            "<td style='text-align: right; font-weight: 700; color: " + (p.tipo === 'EGRESO' ? '#C0392B' : '#27AE60') + ";'>" + formatMoney(p.valor) + "</td>" +
                            "<td><span class='badge-pill " + bClass + "'>" + p.tipo + "</span></td>" +
                            "<td><b>" + p.tercero + "</b></td>" +
+                           "<td>" + simHtml + "</td>" +
                            "<td><div class='protocol-card'>" + p.protocolo + "</div></td>";
             tb.appendChild(tr);
         });
@@ -1318,10 +1553,10 @@ def build_master_workbook_stream(empresa: str, banco: str, rec: ReconcilerCore) 
     # 6. PARTIDAS_PENDIENTES (5 PASOS)
     ws_pend = wb.create_sheet('PARTIDAS_PENDIENTES')
     ws_pend.views.sheetView[0].showGridLines = True
-    ws_pend.merge_cells('A1:G1')
-    ws_pend['A1'] = f"{empresa} - PARTIDAS PENDIENTES (PROTOCOLO OPERATIVO 5 PASOS)"
+    ws_pend.merge_cells('A1:H1')
+    ws_pend['A1'] = f"{empresa} - PARTIDAS PENDIENTES Y OPCIONES MÁS PARECIDAS (AUX 13 Y 2)"
     ws_pend['A1'].font = font_title; ws_pend['A1'].alignment = align_center
-    headers_pend = ['No.', 'Fecha', 'Concepto Extracto', 'Valor ($)', 'Tipo', 'Tercero', 'Protocolo 5 Pasos']
+    headers_pend = ['No.', 'Fecha', 'Concepto Extracto', 'Valor ($)', 'Tipo', 'Tercero Sugerido', 'Opciones Más Parecidas Aux 13 y 2 (FV, FC, NOM, NC)', 'Protocolo 5 Pasos']
     for ci, h in enumerate(headers_pend, 1):
         c = ws_pend.cell(3, ci, h); c.font = font_hdr; c.fill = fill_navy; c.alignment = align_hdr
     pend_list = [t for t in rec.extracto_txs if t.color == 'NARANJA']
@@ -1333,8 +1568,10 @@ def build_master_workbook_stream(empresa: str, banco: str, rec: ReconcilerCore) 
         c_v = ws_pend.cell(r, 4, t.valor); c_v.number_format = '$#,##0.00'; c_v.alignment = align_right
         ws_pend.cell(r, 5, t.tipo).alignment = align_center
         ws_pend.cell(r, 6, t.tercero).alignment = align_left
-        ws_pend.cell(r, 7, t.protocolo).alignment = align_left
-        for c in range(1, 8): ws_pend.cell(r, c).border = border_thin
+        sim_txt = " | ".join([f"{i+1}) {op['tercero']} ({op['doc']}: ${op['valor']:,.2f}, Dif: ${op['dif']:,.2f})" for i, op in enumerate(t.opciones_similares)])
+        ws_pend.cell(r, 7, sim_txt or "Sin candidatos cercanos").alignment = align_left
+        ws_pend.cell(r, 8, t.protocolo).alignment = align_left
+        for c in range(1, 9): ws_pend.cell(r, c).border = border_thin
 
     for sheet in wb.worksheets:
         for col in sheet.columns:
