@@ -69,7 +69,7 @@ class BankTx:
 
 class AuxRec:
     def __init__(self, cuenta: str, fecha: str, fecha_dt: Optional[datetime.date], tipo_doc: str, 
-                 doc_num: str, tercero: str, concepto: str, debito: float, credito: float):
+                 doc_num: str, tercero: str, concepto: str, debito: float, credito: float, saldo: float = 0.0):
         self.cuenta = cuenta
         self.fecha = fecha
         self.fecha_dt = fecha_dt
@@ -79,6 +79,7 @@ class AuxRec:
         self.concepto = concepto.strip()
         self.debito = debito
         self.credito = credito
+        self.saldo = saldo
         self.conciliado = False
         self.estado = "NORMAL"
         self.diagnostico = ""
@@ -190,17 +191,19 @@ class PDFMemoryParser:
                 continue
             m = re.search(r'(\d{2}/\d{2}/\d{4})\s+(.*?)\s+((?:\(PS\)\s*)?[a-zA-Z0-9\s#\.\-_]+?)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,\-]+)$', line)
             if m:
-                fecha_str, nota, doc_num, deb_str, cred_str, _ = m.groups()
+                fecha_str, nota, doc_num, deb_str, cred_str, saldo_str = m.groups()
                 t_pre = line[:m.start()].strip()
                 if t_pre: curr_tercero = t_pre
                 deb = float(deb_str.replace('.', '').replace(',', '.'))
                 cred = float(cred_str.replace('.', '').replace(',', '.'))
+                try: saldo_val = float(saldo_str.replace('.', '').replace(',', '.'))
+                except ValueError: saldo_val = 0.0
                 parts = fecha_str.split('/')
                 try: fecha_dt = datetime.date(int(parts[2]), int(parts[1]), int(parts[0]))
                 except (ValueError, IndexError): fecha_dt = None
                 doc_clean = doc_num.replace('(PS)', '').strip()
                 tipo_doc = "RC" if "rc" in doc_clean.lower() else ("CE" if "ce" in doc_clean.lower() else "DOC")
-                records.append(AuxRec(cta_prefix, fecha_str, fecha_dt, tipo_doc, doc_clean, curr_tercero, nota.strip(), deb, cred))
+                records.append(AuxRec(cta_prefix, fecha_str, fecha_dt, tipo_doc, doc_clean, curr_tercero, nota.strip(), deb, cred, saldo_val))
         return records
 
 # =====================================================================
@@ -373,6 +376,17 @@ class ReconcilerCore:
                 t.cuenta_puc = "1305 / 2335 / 2805"
                 t.diagnostico = "Operación sin registro contable previo en auxiliares."
                 t.protocolo = "Aplicar Protocolo 5 Pasos: 1) Drive, 2) Grupos, 3) Contador, 4) Tesorera, 5) Anticipo."
+
+        # 4B. Detectar partidas anuladas o reversadas internamente dentro del mismo Auxiliar 1110 (Débito vs Crédito igual)
+        unmatched_1110 = [a for a in self.aux_1110 if not a.conciliado]
+        for i, a1 in enumerate(unmatched_1110):
+            if a1.conciliado: continue
+            for a2 in unmatched_1110[i+1:]:
+                if a2.conciliado: continue
+                if (a1.debito > 0 and abs(a1.debito - a2.credito) <= 1.0) or (a1.credito > 0 and abs(a1.credito - a2.debito) <= 1.0):
+                    a1.conciliado = True; a1.estado = "NORMAL"
+                    a2.conciliado = True; a2.estado = "NORMAL"
+                    break
 
         # 5. Auditoría del Auxiliar 1110 para Reversiones y Ajustes
         for a in self.aux_1110:
@@ -995,6 +1009,11 @@ SPA_HTML = """<!DOCTYPE html>
         var tb4 = document.getElementById("tbodyTab4");
         tb4.innerHTML = "";
         var revCnt = 0, ajCnt = 0, transCnt = 0;
+        if (data.reversiones_ajustes.length === 0) {
+            var trEmpty = document.createElement("tr");
+            trEmpty.innerHTML = "<td colspan='8' style='text-align: center; padding: 25px; color: #27AE60; font-weight: 600;'>✅ ¡Excelente! Todas las partidas del Libro Auxiliar 1110 ya fueron arregladas y conciliadas. No quedan partidas por reversar ni ajustar.</td>";
+            tb4.appendChild(trEmpty);
+        }
         data.reversiones_ajustes.forEach(function(r){
             if (r.estado === 'REVERSAR') revCnt++;
             else if (r.estado === 'AJUSTAR') ajCnt++;
@@ -1192,7 +1211,7 @@ def build_master_workbook_stream(empresa: str, banco: str, rec: ReconcilerCore) 
     saldo_ext = rec.extracto_txs[-1].saldo if rec.extracto_txs else 85184.07
     kpis = [
         ('B5:C5', 'B6:C6', 'SALDO SEGÚN EXTRACTO', saldo_ext),
-        ('D5:E5', 'D6:E6', 'SALDO EN LIBROS (1110)', 5697400.87),
+        ('D5:E5', 'D6:E6', 'SALDO EN LIBROS (1110)', (rec.aux_1110[-1].saldo if rec.aux_1110 else 0.0)),
         ('F5:G5', 'F6:G6', 'DIFERENCIA FINAL', 0.0)
     ]
     for tm, bm, lbl, val in kpis:
@@ -1281,13 +1300,9 @@ def build_master_workbook_stream(empresa: str, banco: str, rec: ReconcilerCore) 
     headers_rev = ['Item', 'Fecha Libro', 'Comprobante', 'Tercero', 'Concepto', 'Crédito ($)', 'Diagnóstico', 'Tratamiento']
     for ci, h in enumerate(headers_rev, 1):
         c = ws_rev.cell(3, ci, h); c.font = font_hdr; c.fill = fill_navy; c.alignment = align_hdr
-    rev_items = [
-        (1, "10/01/2026", "ce 2695", "PARMOR SAS", "GASTO NO DEDUCIBLE ASAMBLEA", 711500.00, "REVERSAR", "No salió del banco en enero."),
-        (2, "26/01/2026", "ce 2715", "GARCIA MERIÑO ALFONSO", "PAGO ANTICIPO HONORARIOS", 600000.00, "AJUSTAR", "Sobregiro de comprobante."),
-        (3, "05/01/2026", "ce 2688", "BANCOLOMBIA", "CR CAPITAL (Crédito 350095709)", 3969687.04, "AJUSTAR", "Ajustar diferencia de $581.627,02."),
-        (4, "28/01/2026", "ce 2716", "ALLTECH SOLUTIONS SAS", "PAGO FACTURA COMPRA 3314", 1959890.00, "TRANSITO", "Pago no debitado al cierre.")
-    ]
-    for idx, (it, f, doc, ter, con, cr, diag, trat) in enumerate(rev_items, 1):
+    rev_list = [a for a in rec.aux_1110 if not a.conciliado]
+    for idx, a in enumerate(rev_list, 1):
+        it, f, doc, ter, con, cr, diag, trat = idx, a.fecha, a.doc_num, a.tercero, a.concepto, (a.credito or a.debito), a.estado, a.diagnostico
         r = idx + 3
         ws_rev.cell(r, 1, it).alignment = align_center
         ws_rev.cell(r, 2, f).alignment = align_center
@@ -1418,17 +1433,11 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
                         if not a.conciliado:
                             rev_ajustes.append(a.to_dict())
 
-                    if not rev_ajustes:
-                        rev_ajustes = [
-                            {"fecha": "10/01/2026", "doc_num": "ce 2695", "tercero": "PARMOR SAS", "concepto": "GASTO NO DEDUCIBLE ASAMBLEA", "debito": 0.0, "credito": 711500.00, "estado": "REVERSAR", "diagnostico": "Gasto en libros no debitado en extracto."},
-                            {"fecha": "26/01/2026", "doc_num": "ce 2715", "tercero": "GARCIA MERIÑO ALFONSO", "concepto": "PAGO ANTICIPO HONORARIOS", "debito": 0.0, "credito": 600000.00, "estado": "AJUSTAR", "diagnostico": "Sobregiro de comprobante."},
-                            {"fecha": "05/01/2026", "doc_num": "ce 2688", "tercero": "BANCOLOMBIA", "concepto": "CR CAPITAL (Crédito 350095709)", "debito": 0.0, "credito": 3969687.04, "estado": "AJUSTAR", "diagnostico": "Diferencia mínima de valor ($581.627,02 contra 21051508)."},
-                            {"fecha": "28/01/2026", "doc_num": "ce 2716", "tercero": "ALLTECH SOLUTIONS SAS", "concepto": "PAGO FACTURA DE COMPRA 3314", "debito": 0.0, "credito": 1959890.00, "estado": "TRANSITO", "diagnostico": "Pago registrado no debitado al cierre."}
-                        ]
+                    # No insertar datos fijos si el usuario ya corrigió las partidas en su contabilidad
 
                     # Saldos calculados dinámicamente
                     saldo_ext = ext_meta.saldo_act if ext_meta.saldo_act > 0 else (ext_txs[-1].saldo if ext_txs else 0.0)
-                    saldo_lib = 5697400.87
+                    saldo_lib = aux1110_recs[-1].saldo if aux1110_recs else 0.0
                     diferencia = 0.0
 
                     excel_stream = build_master_workbook_stream(empresa, banco, rec)
