@@ -1149,10 +1149,19 @@ SPA_HTML = """<!DOCTYPE html>
         tr.row-anticipo-amber td:first-child { border-left: 6px solid #D68910 !important; }
         tr.row-sin-revisar td:first-child { border-left: 4px solid #CBD5E1; }
 
-        /* Panel de Meses Guardados */
-        .saved-months-panel { margin-top: 28px; background: #F8FAFC; border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+        /* Panel de Carpetas Bancarias y Meses Archivados */
+        .saved-months-panel { margin-top: 28px; background: #F8FAFC; border: 1px solid var(--border); border-radius: 10px; padding: 22px; }
+        .bank-folders-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 14px; margin-bottom: 18px; }
+        .bank-folder-tab { background: #FFFFFF; border: 2px solid #CBD5E1; border-radius: 10px; padding: 14px 16px; cursor: pointer; transition: all 0.2s ease; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 2px 4px rgba(0,0,0,0.03); }
+        .bank-folder-tab:hover { border-color: var(--primary); transform: translateY(-2px); background: #F1F5F9; }
+        .bank-folder-tab.active { background: #1B365D; color: white; border-color: #1B365D; box-shadow: 0 4px 12px rgba(27,54,93,0.22); }
+        .bank-folder-tab .folder-title { font-weight: 700; font-size: 14.5px; display: flex; align-items: center; gap: 8px; }
+        .bank-folder-tab .folder-sub { font-size: 11.5px; opacity: 0.85; margin-top: 3px; }
+        .bank-folder-badge { background: #E2E8F0; color: #1E293B; padding: 4px 10px; border-radius: 14px; font-size: 11.5px; font-weight: 700; }
+        .bank-folder-tab.active .bank-folder-badge { background: #27AE60; color: white; }
+        .folder-interior-box { background: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 8px; padding: 18px; }
         .saved-months-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-top: 12px; }
-        .saved-month-card { background: white; border: 1px solid #CBD5E1; border-left: 5px solid var(--primary); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 2px 5px rgba(0,0,0,0.04); }
+        .saved-month-card { background: #F8FAFC; border: 1px solid #CBD5E1; border-left: 5px solid var(--primary); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 2px 5px rgba(0,0,0,0.04); }
         .saved-month-card h5 { margin: 0 0 6px 0; color: var(--primary); font-size: 14px; }
         .saved-month-card p { margin: 2px 0; font-size: 12px; color: #475569; }
     </style>
@@ -1207,7 +1216,7 @@ SPA_HTML = """<!DOCTYPE html>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 25px; max-width: 720px;">
             <div>
                 <label style="font-weight: 600; font-size: 13px; color: #4B5563;">Entidad Bancaria:</label>
-                <select class="form-control" id="bancoSelect" style="margin-top: 6px;">
+                <select class="form-control" id="bancoSelect" style="margin-top: 6px;" onchange="selectBankFolder(this.value)">
                     <option value="BANCOLOMBIA" selected>Bancolombia S.A. (Cuenta de Ahorros / Corriente)</option>
                     <option value="BBVA">Banco BBVA</option>
                     <option value="DAVIVIENDA">Banco Davivienda S.A.</option>
@@ -1236,15 +1245,25 @@ SPA_HTML = """<!DOCTYPE html>
             <button class="btn btn-primary" style="width: auto; padding: 12px 30px;" onclick="goToUpload()">Subir Nuevos PDFs para este Mes</button>
         </div>
 
-        <!-- PANEL DE CONCILIACIONES GUARDADAS POR MES -->
+        <!-- PANEL DE CARPETAS BANCARIAS POR EMPRESA Y MESES ARCHIVADOS -->
         <div class="saved-months-panel">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
                 <div>
-                    <h4 style="margin:0; color:var(--primary); font-size:16px;">📂 Conciliaciones Guardadas por Mes (Abrir sin volver a subir PDFs)</h4>
-                    <p style="margin:3px 0 0 0; font-size:12px; color:#64748B;">Cada mes procesado se guarda de forma ultraligera (~25 KB) con todos los colores y cruces que hayas marcado.</p>
+                    <h4 style="margin:0; color:var(--primary); font-size:16px;" id="foldersPanelTitle">📁 Carpetas Bancarias de PARMOR SAS (3 Bancos)</h4>
+                    <p style="margin:3px 0 0 0; font-size:12px; color:#64748B;">Selecciona la carpeta del banco para ver y abrir los meses archivados adentro sin volver a subir PDFs:</p>
                 </div>
             </div>
-            <div id="savedMonthsContainer" class="saved-months-grid"></div>
+            <!-- Pestañas / Carpetas de Bancos (3 para PARMOR SAS, 2 para ALLTECH SOLUTIONS S.A.S.) -->
+            <div id="bankFoldersBar" class="bank-folders-grid"></div>
+
+            <!-- Interior de la Carpeta Seleccionada -->
+            <div class="folder-interior-box">
+                <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:10px; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+                    <div id="activeFolderHeader" style="font-weight:700; color:var(--primary); font-size:14px;">📂 Carpeta Abierta: BANCOLOMBIA</div>
+                    <button type="button" class="btn btn-primary" style="width:auto; padding:6px 14px; font-size:12px;" onclick="goToUpload()">➕ Archivar Nuevo Mes en esta Carpeta</button>
+                </div>
+                <div id="savedMonthsContainer" class="saved-months-grid"></div>
+            </div>
         </div>
     </div>
 
@@ -1599,24 +1618,116 @@ SPA_HTML = """<!DOCTYPE html>
     }
 
     var savedKeysList = [];
+    var lastMergedMap = {};
+
+    var MONTH_ORDER = {
+        "ENERO 2026": 1, "FEBRERO 2026": 2, "MARZO 2026": 3, "ABRIL 2026": 4,
+        "MAYO 2026": 5, "JUNIO 2026": 6, "JULIO 2026": 7, "AGOSTO 2026": 8,
+        "SEPTIEMBRE 2026": 9, "OCTUBRE 2026": 10, "NOVIEMBRE 2026": 11, "DICIEMBRE 2026": 12
+    };
+
+    function getCompanyBanks(comp) {
+        if (comp === "PARMOR SAS") {
+            return [
+                { code: "BANCOLOMBIA", label: "Bancolombia", desc: "Cuenta Ahorros / Corriente" },
+                { code: "BBVA", label: "Banco BBVA", desc: "Ahorros Empresarial" },
+                { code: "DAVIVIENDA", label: "Davivienda", desc: "Cuenta de Ahorros" }
+            ];
+        } else {
+            return [
+                { code: "BANCOLOMBIA", label: "Bancolombia", desc: "Cuenta Ahorros / Corriente" },
+                { code: "DAVIVIENDA", label: "Davivienda", desc: "Cuenta de Ahorros" }
+            ];
+        }
+    }
+
+    function selectBankFolder(bankCode) {
+        currentBank = bankCode;
+        var bcoSel = document.getElementById("bancoSelect");
+        if (bcoSel && bcoSel.value !== bankCode) {
+            bcoSel.value = bankCode;
+        }
+        drawSavedMonthCards(lastMergedMap);
+    }
+
     function drawSavedMonthCards(map) {
+        lastMergedMap = map || {};
+        var foldersBar = document.getElementById("bankFoldersBar");
         var container = document.getElementById("savedMonthsContainer");
-        if (!container) return;
+        var titleEl = document.getElementById("foldersPanelTitle");
+        var hdrEl = document.getElementById("activeFolderHeader");
+        if (!container || !foldersBar) return;
+
+        var banks = getCompanyBanks(currentCompany);
+        // Asegurar que currentBank sea válido para la empresa actual
+        if (!banks.some(function(b){ return b.code === currentBank; })) {
+            currentBank = banks[0].code;
+        }
+
+        if (titleEl) {
+            titleEl.innerText = "📁 Carpetas Bancarias de " + currentCompany + " (" + banks.length + " Bancos)";
+        }
+
+        savedKeysList = Object.keys(lastMergedMap);
+
+        // Construir las tarjetas de Carpetas Bancarias
+        foldersBar.innerHTML = "";
+        banks.forEach(function(bInfo){
+            var countMeses = 0;
+            savedKeysList.forEach(function(k){
+                var item = lastMergedMap[k];
+                if (item && (item.empresa || "PARMOR SAS") === currentCompany && (item.banco || "").toUpperCase() === bInfo.code) {
+                    countMeses++;
+                }
+            });
+            var isOpen = (currentBank === bInfo.code);
+            var fCard = document.createElement("div");
+            fCard.className = "bank-folder-tab" + (isOpen ? " active" : "");
+            fCard.onclick = function() { selectBankFolder(bInfo.code); };
+            var icon = isOpen ? "📂" : "📁";
+            fCard.innerHTML = "<div>" +
+                              "<div class='folder-title'>" + icon + " Carpeta " + bInfo.label + "</div>" +
+                              "<div class='folder-sub'>" + bInfo.desc + "</div>" +
+                              "</div>" +
+                              "<span class='bank-folder-badge'>" + countMeses + (countMeses === 1 ? " mes" : " meses") + "</span>";
+            foldersBar.appendChild(fCard);
+        });
+
+        if (hdrEl) {
+            hdrEl.innerHTML = "📂 Meses Archivados en la Carpeta <b>" + currentBank + "</b> de <b>" + currentCompany + "</b>:";
+        }
+
+        // Filtrar y ordenar cronológicamente los meses guardados dentro de la carpeta del banco activo
+        var folderItems = [];
+        savedKeysList.forEach(function(k, kIdx){
+            var d = lastMergedMap[k];
+            if (d && (d.empresa || "PARMOR SAS") === currentCompany && (d.banco || "").toUpperCase() === currentBank) {
+                folderItems.push({ key: k, idx: kIdx, data: d });
+            }
+        });
+
+        folderItems.sort(function(a, b){
+            var ma = MONTH_ORDER[(a.data.mes_guardado || "ENERO 2026").toUpperCase()] || 99;
+            var mb = MONTH_ORDER[(b.data.mes_guardado || "ENERO 2026").toUpperCase()] || 99;
+            return ma - mb;
+        });
+
         container.innerHTML = "";
-        savedKeysList = Object.keys(map);
-        if (savedKeysList.length === 0) {
-            container.innerHTML = "<div style='color:#64748B; font-size:13px; padding:10px;'>Aún no tienes meses guardados. Cuando proceses el extracto de un mes, quedará guardado aquí automáticamente para que no tengas que volver a subir los PDFs.</div>";
+        if (folderItems.length === 0) {
+            container.innerHTML = "<div style='color:#64748B; font-size:13px; padding:12px; grid-column: 1 / -1;'>📭 La carpeta de <b>" + currentBank + " (" + currentCompany + ")</b> aún no tiene meses archivados. Elige el mes arriba y haz clic en <b>➕ Archivar Nuevo Mes en esta Carpeta</b> para subir el extracto.</div>";
             return;
         }
-        savedKeysList.forEach(function(k, kIdx){
-            var d = map[k];
+
+        folderItems.forEach(function(entry){
+            var d = entry.data;
+            var kIdx = entry.idx;
             var totPend = (d.partidas_pendientes || []).length;
             var revPend = (d.partidas_pendientes || []).filter(function(p){ return p.estado_revision === 'CRUZADA_OPCION' || p.estado_revision === 'ANTICIPO_5PASOS'; }).length;
             var card = document.createElement("div");
             card.className = "saved-month-card";
             card.innerHTML = "<div>" +
                              "<h5>📅 " + (d.mes_guardado || "ENERO 2026") + " — " + d.banco + "</h5>" +
-                             "<p><b>Empresa:</b> " + d.empresa + "</p>" +
+                             "<p><b>Empresa:</b> " + d.empresa + " | <b>Cta:</b> " + (d.num_cuenta || "S/N") + "</p>" +
                              "<p><b>Saldo Extracto:</b> " + formatMoney(d.saldo_extracto || 0) + " (" + (d.total_movimientos || 0) + " movs)</p>" +
                              "<p><b>Avance Hoja 5:</b> <span style='color:#1E8449; font-weight:700;'>" + revPend + " de " + totPend + " gestionadas en color</span></p>" +
                              "<p style='font-size:11px; color:#94A3B8;'>Último guardado: " + (d.updated_at || "Reciente") + "</p>" +
@@ -1628,7 +1739,6 @@ SPA_HTML = """<!DOCTYPE html>
             container.appendChild(card);
         });
     }
-
     function openSavedMonth(key) {
         var map = getSavedMonthsMap();
         if (map[key]) {
@@ -1694,6 +1804,8 @@ SPA_HTML = """<!DOCTYPE html>
             bco.add(new Option("Bancolombia S.A. (Cuenta de Ahorros / Corriente)", "BANCOLOMBIA"));
             bco.add(new Option("Banco Davivienda S.A.", "DAVIVIENDA"));
         }
+        currentBank = bco.value;
+        drawSavedMonthCards(lastMergedMap);
     }
 
     function goToUpload() {
