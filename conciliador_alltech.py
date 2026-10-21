@@ -1445,6 +1445,10 @@ SPA_HTML = """<!DOCTYPE html>
                     <span>🟢 Total Ingresos Pendientes:</span>
                     <b id="kpiPendEntMonto">$0.00</b>
                 </div>
+                <div class="sub-kpi" style="border-left-color: var(--primary);">
+                    <span>Total Partidas en Investigación:</span>
+                    <b id="kpiPendTotCount">0 partidas</b>
+                </div>
                 <div class="sub-kpi" style="border-left-color: #1E8449;">
                     <span>✅ Ya Cruzadas / Marcadas (En Color):</span>
                     <b id="kpiPendRevCount" style="color:#1E8449;">0 de 0</b>
@@ -1552,16 +1556,17 @@ SPA_HTML = """<!DOCTYPE html>
         });
     }
 
+    var savedKeysList = [];
     function drawSavedMonthCards(map) {
         var container = document.getElementById("savedMonthsContainer");
         if (!container) return;
         container.innerHTML = "";
-        var keys = Object.keys(map);
-        if (keys.length === 0) {
+        savedKeysList = Object.keys(map);
+        if (savedKeysList.length === 0) {
             container.innerHTML = "<div style='color:#64748B; font-size:13px; padding:10px;'>Aún no tienes meses guardados. Cuando proceses el extracto de un mes, quedará guardado aquí automáticamente para que no tengas que volver a subir los PDFs.</div>";
             return;
         }
-        keys.forEach(function(k){
+        savedKeysList.forEach(function(k, kIdx){
             var d = map[k];
             var totPend = (d.partidas_pendientes || []).length;
             var revPend = (d.partidas_pendientes || []).filter(function(p){ return p.estado_revision === 'CRUZADA_OPCION' || p.estado_revision === 'ANTICIPO_5PASOS'; }).length;
@@ -1575,8 +1580,8 @@ SPA_HTML = """<!DOCTYPE html>
                              "<p style='font-size:11px; color:#94A3B8;'>Último guardado: " + (d.updated_at || "Reciente") + "</p>" +
                              "</div>" +
                              "<div style='display:flex; gap:8px; margin-top:10px;'>" +
-                             "<button type='button' class='btn btn-success' style='padding:7px 12px; font-size:12px; flex:1;' onclick='openSavedMonth(" + JSON.stringify(k) + ")'>📂 Abrir Mes</button>" +
-                             "<button type='button' class='btn' style='background:#FADBD8; color:#900C3F; padding:7px 10px; font-size:12px;' onclick='deleteSavedMonth(" + JSON.stringify(k) + ")'>🗑️</button>" +
+                             "<button type='button' class='btn btn-success' style='padding:7px 12px; font-size:12px; flex:1;' onclick='openSavedMonth(savedKeysList[" + kIdx + "])'>📂 Abrir Mes</button>" +
+                             "<button type='button' class='btn' style='background:#FADBD8; color:#900C3F; padding:7px 10px; font-size:12px;' onclick='deleteSavedMonth(savedKeysList[" + kIdx + "])'>🗑️</button>" +
                              "</div>";
             container.appendChild(card);
         });
