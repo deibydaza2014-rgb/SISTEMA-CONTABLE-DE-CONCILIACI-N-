@@ -150,23 +150,35 @@ class PDFMemoryParser:
     @classmethod
     def detect_bank_from_text(cls, text: str) -> str:
         t_u = text.upper()
-        if 'DAVIVIENDA' in t_u or 'CLASE DE MOVIMIENTO' in t_u or 'MAS CREDITOS' in t_u or 'MÁS CRÉDITOS' in t_u:
+        # Verificar encabezados estructurales exclusivos de cada extracto (no palabras sueltas que pueden venir en conceptos de transferencias)
+        if 'SALDO ANTERIOR' in t_u and ('TOTAL ABONOS' in t_u or 'TOTAL CARGOS' in t_u or 'ESTADO DE CUENTA' in t_u):
+            return 'BANCOLOMBIA'
+        if 'CLASE DE MOVIMIENTO' in t_u or ('NUEVO SALDO' in t_u and ('MENOS DÉBITOS' in t_u or 'MENOS DEBITOS' in t_u)) or 'BANCO DAVIVIENDA S.A' in t_u:
             return 'DAVIVIENDA'
-        if 'BBVA' in t_u or 'SALDO CIERRE MES ANTERIOR' in t_u or 'FECHA OPERACIÓN' in t_u or 'ABONO CON BRE-B' in t_u:
+        if 'SALDO CIERRE MES ANTERIOR' in t_u or 'BBVA COLOMBIA' in t_u or ('FECHA OPERACIÓN' in t_u and 'SALDO FINAL' in t_u):
             return 'BBVA'
         return 'BANCOLOMBIA'
 
     @classmethod
     def parse_extracto(cls, stream: io.BytesIO) -> Tuple[List[BankTx], StatementMetadata]:
         text = cls.extract_text(stream)
-        bank_type = cls.detect_bank_from_text(text)
+        # Probar los 3 lectores estructurales y elegir el que extraiga movimientos reales del PDF
+        res_bco = cls._parse_extracto_bancolombia(text)
+        res_dav = cls._parse_extracto_davivienda(text)
+        res_bbv = cls._parse_extracto_bbva(text)
 
+        candidates = [res_bco, res_dav, res_bbv]
+        best_txs, best_meta = max(candidates, key=lambda item: len(item[0]))
+        if len(best_txs) > 0:
+            return best_txs, best_meta
+
+        # Si ninguno extrajo filas, usar el detectado por encabezado
+        bank_type = cls.detect_bank_from_text(text)
         if bank_type == 'DAVIVIENDA':
-            return cls._parse_extracto_davivienda(text)
+            return res_dav
         elif bank_type == 'BBVA':
-            return cls._parse_extracto_bbva(text)
-        else:
-            return cls._parse_extracto_bancolombia(text)
+            return res_bbv
+        return res_bco
 
     @classmethod
     def _parse_extracto_davivienda(cls, text: str) -> Tuple[List[BankTx], StatementMetadata]:
@@ -284,21 +296,51 @@ class PDFMemoryParser:
 
         meta = StatementMetadata(cuenta, periodo, saldo_ant, tot_abonos, tot_cargos, saldo_act, 'BANCOLOMBIA')
         txs = []
+        prev_s = saldo_ant
         for line in text.split('\n'):
             line_s = line.strip()
             if not line_s: continue
-            m = re.match(r'^\s*(\d{1,2}/\d{2})\s+(.*?)\s+([-+]?(?:\d+)?(?:\.\d{2})|[-+]?[\d,]+\.\d{2})\s+([\d,]+\.\d{2}|\.00)\s*$', line)
+            m = re.match(r'^\s*(\d{1,2}/\d{2}(?:/\d{2,4})?|\d{4}/\d{2}/\d{2})\s+(.*?)\s+\$?\s*([-+]?(?:\d+)?(?:\.\d{2})|[-+]?[\d,]+\.\d{2}|[-+]?[\d\.]+,\d{2})\s+\$?\s*([-+]?(?:\d+)?(?:\.\d{2})|[-+]?[\d,]+\.\d{2}|[-+]?[\d\.]+,\d{2}|\.00)\s*$', line)
             if m:
                 f_str, desc, v_str, s_str = m.groups()
                 desc = desc.strip()
-                v = float(v_str.replace(',', ''))
-                tipo = 'INGRESO' if v > 0 else 'EGRESO'
+                def _parse_num(ns):
+                    ns = ns.strip()
+                    if ns in ['.00', '-.00', ',00', '-,00']: return 0.0
+                    if ',' in ns and '.' in ns:
+                        if ns.rfind(',') > ns.rfind('.'):
+                            return float(ns.replace('.', '').replace(',', '.'))
+                        return float(ns.replace(',', ''))
+                    if ',' in ns and ns.rfind(',') == len(ns) - 3:
+                        return float(ns.replace(',', '.'))
+                    return float(ns.replace(',', ''))
+                v = _parse_num(v_str)
+                s_val = _parse_num(s_str)
+                if '-' in v_str:
+                    tipo = 'EGRESO'
+                elif '+' in v_str:
+                    tipo = 'INGRESO'
+                elif prev_s > 0 and s_val > 0 and abs((prev_s - abs(v)) - s_val) <= 1.0:
+                    tipo = 'EGRESO'
+                elif prev_s > 0 and s_val > 0 and abs((prev_s + abs(v)) - s_val) <= 1.0:
+                    tipo = 'INGRESO'
+                else:
+                    tipo = 'INGRESO' if v > 0 else 'EGRESO'
+                prev_s = s_val
                 parts = f_str.split('/')
-                day, month = int(parts[0]), int(parts[1])
-                try: fecha_dt = datetime.date(2026, month, day)
+                if len(parts[0]) == 4:
+                    year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+                    f_disp = f"{day:02d}/{month:02d}/{year}"
+                elif len(parts) == 3:
+                    day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
+                    if year < 100: year += 2000
+                    f_disp = f"{day:02d}/{month:02d}/{year}"
+                else:
+                    day, month, year = int(parts[0]), int(parts[1]), 2026
+                    f_disp = f"{f_str}/2026"
+                try: fecha_dt = datetime.date(year, month, day)
                 except ValueError: fecha_dt = None
-                s_val = float(s_str.replace(',', '')) if s_str != '.00' else 0.0
-                txs.append(BankTx(f"{f_str}/2026", fecha_dt, desc, abs(v), tipo, s_val))
+                txs.append(BankTx(f_disp, fecha_dt, desc, abs(v), tipo, s_val))
 
         if meta.saldo_act == 0.0 and txs:
             meta.saldo_act = txs[-1].saldo
