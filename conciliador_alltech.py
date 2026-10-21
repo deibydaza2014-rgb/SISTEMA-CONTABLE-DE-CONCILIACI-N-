@@ -1099,6 +1099,20 @@ SPA_HTML = """<!DOCTYPE html>
 
         .protocol-card { background: #FEF9E7; border-left: 4px solid var(--accent); padding: 8px 12px; border-radius: 4px; font-size: 11px; line-height: 1.4; }
         .alert-error { background: #FADBD8; color: #78281F; padding: 10px; border-radius: 6px; font-size: 13px; margin-bottom: 15px; display: none; }
+
+        /* Coloreado completo de fila y cuadro en Pestaña 5 cuando ya se cruzó o se mandó a Anticipo/5 Pasos */
+        tr.row-cruzada-green td { background-color: #D4EFDF !important; border-bottom: 1px solid #A9DFBF !important; transition: background-color 0.25s ease; }
+        tr.row-cruzada-green td:first-child { border-left: 6px solid #1E8449 !important; }
+        tr.row-anticipo-amber td { background-color: #FCF3CF !important; border-bottom: 1px solid #F9E79F !important; transition: background-color 0.25s ease; }
+        tr.row-anticipo-amber td:first-child { border-left: 6px solid #D68910 !important; }
+        tr.row-sin-revisar td:first-child { border-left: 4px solid #CBD5E1; }
+
+        /* Panel de Meses Guardados */
+        .saved-months-panel { margin-top: 28px; background: #F8FAFC; border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+        .saved-months-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-top: 12px; }
+        .saved-month-card { background: white; border: 1px solid #CBD5E1; border-left: 5px solid var(--primary); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 2px 5px rgba(0,0,0,0.04); }
+        .saved-month-card h5 { margin: 0 0 6px 0; color: var(--primary); font-size: 14px; }
+        .saved-month-card p { margin: 2px 0; font-size: 12px; color: #475569; }
     </style>
 </head>
 <body>
@@ -1148,24 +1162,59 @@ SPA_HTML = """<!DOCTYPE html>
             </div>
         </div>
 
-        <div style="margin-top: 25px; max-width: 420px;">
-            <label style="font-weight: 600; font-size: 13px; color: #4B5563;">Entidad Bancaria:</label>
-            <select class="form-control" id="bancoSelect" style="margin-top: 6px;">
-                <option value="BANCOLOMBIA" selected>Bancolombia S.A. (Cuenta de Ahorros / Corriente)</option>
-                <option value="BBVA">Banco BBVA</option>
-                <option value="DAVIVIENDA">Banco Davivienda S.A.</option>
-            </select>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 25px; max-width: 720px;">
+            <div>
+                <label style="font-weight: 600; font-size: 13px; color: #4B5563;">Entidad Bancaria:</label>
+                <select class="form-control" id="bancoSelect" style="margin-top: 6px;">
+                    <option value="BANCOLOMBIA" selected>Bancolombia S.A. (Cuenta de Ahorros / Corriente)</option>
+                    <option value="BBVA">Banco BBVA</option>
+                    <option value="DAVIVIENDA">Banco Davivienda S.A.</option>
+                </select>
+            </div>
+            <div>
+                <label style="font-weight: 600; font-size: 13px; color: #4B5563;">Mes / Período a Guardar o Consultar:</label>
+                <select class="form-control" id="mesSelect" style="margin-top: 6px;">
+                    <option value="ENERO 2026" selected>Enero 2026</option>
+                    <option value="FEBRERO 2026">Febrero 2026</option>
+                    <option value="MARZO 2026">Marzo 2026</option>
+                    <option value="ABRIL 2026">Abril 2026</option>
+                    <option value="MAYO 2026">Mayo 2026</option>
+                    <option value="JUNIO 2026">Junio 2026</option>
+                    <option value="JULIO 2026">Julio 2026</option>
+                    <option value="AGOSTO 2026">Agosto 2026</option>
+                    <option value="SEPTIEMBRE 2026">Septiembre 2026</option>
+                    <option value="OCTUBRE 2026">Octubre 2026</option>
+                    <option value="NOVIEMBRE 2026">Noviembre 2026</option>
+                    <option value="DICIEMBRE 2026">Diciembre 2026</option>
+                </select>
+            </div>
         </div>
 
-        <div style="margin-top: 30px;">
-            <button class="btn btn-primary" style="width: auto; padding: 12px 30px;" onclick="goToUpload()">Continuar al Módulo de Carga</button>
+        <div style="margin-top: 25px;">
+            <button class="btn btn-primary" style="width: auto; padding: 12px 30px;" onclick="goToUpload()">Subir Nuevos PDFs para este Mes</button>
+        </div>
+
+        <!-- PANEL DE CONCILIACIONES GUARDADAS POR MES -->
+        <div class="saved-months-panel">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                    <h4 style="margin:0; color:var(--primary); font-size:16px;">📂 Conciliaciones Guardadas por Mes (Abrir sin volver a subir PDFs)</h4>
+                    <p style="margin:3px 0 0 0; font-size:12px; color:#64748B;">Cada mes procesado se guarda de forma ultraligera (~25 KB) con todos los colores y cruces que hayas marcado.</p>
+                </div>
+            </div>
+            <div id="savedMonthsContainer" class="saved-months-grid"></div>
         </div>
     </div>
 
     <!-- CAPA 3: CARGA DE DOCUMENTOS -->
     <div class="layer" id="layer3">
-        <h3 style="color: var(--primary); margin-top: 0;">Carga de Documentos Contables (PDF)</h3>
-        <p style="color: #64748B; font-size: 13px;">Sube los archivos PDF para ejecutar la auditoría de 3 vías en memoria:</p>
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+                <h3 style="color: var(--primary); margin-top: 0;">Carga de Documentos Contables (PDF)</h3>
+                <p style="color: #64748B; font-size: 13px;">Sube los archivos PDF para ejecutar la auditoría de 3 vías en memoria y guardarla en el mes seleccionado:</p>
+            </div>
+            <div id="uploadMonthBadge" style="background:#EDF3FA; color:#1B365D; padding:8px 14px; border-radius:6px; font-weight:700; font-size:13px;"></div>
+        </div>
 
         <form id="uploadForm">
             <div class="upload-grid">
@@ -1196,12 +1245,16 @@ SPA_HTML = """<!DOCTYPE html>
 
     <!-- CAPA 4: VISUALIZACIÓN INTERACTIVA DE PESTAÑAS CON FILTROS -->
     <div class="layer" id="layer4">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px;">
             <div>
                 <h3 style="color: var(--primary); margin: 0;" id="dashTitle">Informe de Conciliación Bancaria</h3>
                 <p style="margin: 4px 0 0 0; font-size: 13px; color: #64748B;" id="dashSubtitle">Cruce integral de 3 vías</p>
             </div>
-            <button class="btn btn-success" onclick="downloadExcel()">📥 Descargar Informe en Excel</button>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <span id="saveStatusBadge" style="background:#E2F0D9; color:#1E8449; padding:7px 12px; border-radius:6px; font-size:12px; font-weight:700;">💾 Mes Guardado Automáticamente</span>
+                <button class="btn" style="background:#1B365D; color:white;" onclick="goToLayer('layer2'); renderSavedMonthsList();">📂 Cambiar Mes / Ver Guardados</button>
+                <button class="btn btn-success" onclick="downloadExcel()">📥 Descargar Informe en Excel</button>
+            </div>
         </div>
 
         <div class="kpi-row">
@@ -1392,18 +1445,24 @@ SPA_HTML = """<!DOCTYPE html>
                     <span>🟢 Total Ingresos Pendientes:</span>
                     <b id="kpiPendEntMonto">$0.00</b>
                 </div>
-                <div class="sub-kpi" style="border-left-color: var(--primary);">
-                    <span>Total Partidas en Investigación:</span>
-                    <b id="kpiPendTotCount">0 partidas</b>
+                <div class="sub-kpi" style="border-left-color: #1E8449;">
+                    <span>✅ Ya Cruzadas / Marcadas (En Color):</span>
+                    <b id="kpiPendRevCount" style="color:#1E8449;">0 de 0</b>
+                </div>
+                <div class="sub-kpi" style="border-left-color: #D68910;">
+                    <span>⏳ Faltan por Revisar (En Blanco):</span>
+                    <b id="kpiPendFaltanCount" style="color:#D68910;">0 partidas</b>
                 </div>
             </div>
 
-            <!-- FILTRO SOLICITADO: Salidas vs Ingresos -->
+            <!-- FILTRO SOLICITADO: Salidas vs Ingresos + Faltantes por revisar -->
             <div class="filter-toolbar">
                 <div class="filter-buttons">
-                    <span class="filter-chip active" onclick="filterPendientes('TODAS', this)">Ver Todas las Pendientes (<span id="cPendAll">0</span>)</span>
-                    <span class="filter-chip chip-danger" onclick="filterPendientes('EGRESO', this)">🔴 Solo Salidas Pendientes (Egresos) (<span id="cPendSal">0</span>)</span>
-                    <span class="filter-chip chip-success" onclick="filterPendientes('INGRESO', this)">🟢 Solo Ingresos Pendientes (<span id="cPendEnt">0</span>)</span>
+                    <span class="filter-chip active" onclick="filterPendientes('TODAS', this)">Ver Todas (<span id="cPendAll">0</span>)</span>
+                    <span class="filter-chip chip-danger" onclick="filterPendientes('EGRESO', this)">🔴 Salidas (<span id="cPendSal">0</span>)</span>
+                    <span class="filter-chip chip-success" onclick="filterPendientes('INGRESO', this)">🟢 Ingresos (<span id="cPendEnt">0</span>)</span>
+                    <span class="filter-chip" onclick="filterPendientes('FALTANTES', this)">⏳ Solo Faltantes por Revisar (<span id="cPendFaltan">0</span>)</span>
+                    <span class="filter-chip" onclick="filterPendientes('REVISADAS', this)">✅ Ya Cruzadas / En Color (<span id="cPendRev">0</span>)</span>
                 </div>
                 <input type="text" class="search-box" id="searchPend" placeholder="Buscar fecha, concepto, valor o tercero..." onkeyup="renderPendientesTable()">
             </div>
@@ -1436,9 +1495,128 @@ SPA_HTML = """<!DOCTYPE html>
 <script>
     var currentCompany = "PARMOR SAS";
     var currentBank = "BANCOLOMBIA";
+    var currentMonth = "ENERO 2026";
     var auditData = null;
     var activeGbFilter = 'TODOS';
     var activePendFilter = 'TODAS';
+    var STORAGE_KEY = "CONCILIADOR_SAVED_MONTHS_V2";
+
+    function getSavedMonthsMap() {
+        try {
+            var raw = localStorage.getItem(STORAGE_KEY);
+            return raw ? JSON.parse(raw) : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function saveCurrentAuditToMonth() {
+        if (!auditData) return;
+        var key = (auditData.empresa || currentCompany) + " | " + (auditData.banco || currentBank) + " | " + (auditData.mes_guardado || currentMonth);
+        auditData.mes_guardado = auditData.mes_guardado || currentMonth;
+        auditData.updated_at = new Date().toLocaleString('es-CO');
+        try {
+            var map = getSavedMonthsMap();
+            map[key] = auditData;
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
+        } catch (e) {
+            console.warn("Aviso localStorage:", e);
+        }
+        // Sincronizar también en memoria del servidor
+        fetch("/guardar_mes", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ key: key, data: auditData })
+        }).catch(function(){});
+
+        var badge = document.getElementById("saveStatusBadge");
+        if (badge) {
+            badge.innerText = "💾 Guardado en " + (auditData.mes_guardado || currentMonth) + " (" + new Date().toLocaleTimeString('es-CO') + ")";
+        }
+    }
+
+    function renderSavedMonthsList() {
+        var container = document.getElementById("savedMonthsContainer");
+        if (!container) return;
+        var map = getSavedMonthsMap();
+        // Mezclar con los del servidor si existen
+        fetch("/listar_meses")
+        .then(function(r){ return r.json(); })
+        .then(function(serverMap){
+            var merged = Object.assign({}, serverMap || {}, map);
+            try { localStorage.setItem(STORAGE_KEY, JSON.stringify(merged)); } catch(e){}
+            drawSavedMonthCards(merged);
+        })
+        .catch(function(){
+            drawSavedMonthCards(map);
+        });
+    }
+
+    function drawSavedMonthCards(map) {
+        var container = document.getElementById("savedMonthsContainer");
+        if (!container) return;
+        container.innerHTML = "";
+        var keys = Object.keys(map);
+        if (keys.length === 0) {
+            container.innerHTML = "<div style='color:#64748B; font-size:13px; padding:10px;'>Aún no tienes meses guardados. Cuando proceses el extracto de un mes, quedará guardado aquí automáticamente para que no tengas que volver a subir los PDFs.</div>";
+            return;
+        }
+        keys.forEach(function(k){
+            var d = map[k];
+            var totPend = (d.partidas_pendientes || []).length;
+            var revPend = (d.partidas_pendientes || []).filter(function(p){ return p.estado_revision === 'CRUZADA_OPCION' || p.estado_revision === 'ANTICIPO_5PASOS'; }).length;
+            var card = document.createElement("div");
+            card.className = "saved-month-card";
+            card.innerHTML = "<div>" +
+                             "<h5>📅 " + (d.mes_guardado || "ENERO 2026") + " — " + d.banco + "</h5>" +
+                             "<p><b>Empresa:</b> " + d.empresa + "</p>" +
+                             "<p><b>Saldo Extracto:</b> " + formatMoney(d.saldo_extracto || 0) + " (" + (d.total_movimientos || 0) + " movs)</p>" +
+                             "<p><b>Avance Hoja 5:</b> <span style='color:#1E8449; font-weight:700;'>" + revPend + " de " + totPend + " gestionadas en color</span></p>" +
+                             "<p style='font-size:11px; color:#94A3B8;'>Último guardado: " + (d.updated_at || "Reciente") + "</p>" +
+                             "</div>" +
+                             "<div style='display:flex; gap:8px; margin-top:10px;'>" +
+                             "<button type='button' class='btn btn-success' style='padding:7px 12px; font-size:12px; flex:1;' onclick='openSavedMonth(" + JSON.stringify(k) + ")'>📂 Abrir Mes</button>" +
+                             "<button type='button' class='btn' style='background:#FADBD8; color:#900C3F; padding:7px 10px; font-size:12px;' onclick='deleteSavedMonth(" + JSON.stringify(k) + ")'>🗑️</button>" +
+                             "</div>";
+            container.appendChild(card);
+        });
+    }
+
+    function openSavedMonth(key) {
+        var map = getSavedMonthsMap();
+        if (map[key]) {
+            loadSavedAuditData(map[key]);
+        } else {
+            fetch("/listar_meses")
+            .then(function(r){ return r.json(); })
+            .then(function(sMap){
+                if (sMap && sMap[key]) loadSavedAuditData(sMap[key]);
+            });
+        }
+    }
+
+    function loadSavedAuditData(data) {
+        auditData = data;
+        currentCompany = data.empresa || currentCompany;
+        currentBank = data.banco || currentBank;
+        currentMonth = data.mes_guardado || currentMonth;
+        renderDashboard(auditData);
+        goToLayer('layer4');
+    }
+
+    function deleteSavedMonth(key) {
+        if (!confirm("¿Deseas borrar el mes guardado '" + key + "'?")) return;
+        var map = getSavedMonthsMap();
+        delete map[key];
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(map)); } catch(e){}
+        fetch("/borrar_mes", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ key: key })
+        }).finally(function(){
+            renderSavedMonthsList();
+        });
+    }
 
     function handleLogin() {
         var u = document.getElementById("loginUser").value.trim().toLowerCase();
@@ -1447,6 +1625,7 @@ SPA_HTML = """<!DOCTYPE html>
             document.getElementById("loginError").style.display = "none";
             document.getElementById("userHeaderTag").innerText = "Usuario: aux contable@contable.com";
             goToLayer('layer2');
+            renderSavedMonthsList();
         } else {
             document.getElementById("loginError").style.display = "block";
         }
@@ -1472,6 +1651,9 @@ SPA_HTML = """<!DOCTYPE html>
 
     function goToUpload() {
         currentBank = document.getElementById("bancoSelect").value;
+        currentMonth = document.getElementById("mesSelect").value;
+        var b = document.getElementById("uploadMonthBadge");
+        if (b) b.innerText = "📅 " + currentCompany + " | " + currentBank + " | " + currentMonth;
         goToLayer('layer3');
     }
 
@@ -1529,7 +1711,10 @@ SPA_HTML = """<!DOCTYPE html>
         .then(function(data){
             btn.innerText = "EJECUTAR AUDITORÍA Y MOSTRAR PESTAÑAS";
             btn.disabled = false;
+            data.mes_guardado = currentMonth;
+            currentBank = data.banco || currentBank;
             auditData = data;
+            saveCurrentAuditToMonth();
             renderDashboard(data);
             goToLayer('layer4');
         })
@@ -1710,6 +1895,26 @@ SPA_HTML = """<!DOCTYPE html>
         renderPendientesTable();
     }
 
+    function updatePendReviewCounters() {
+        if (!auditData) return;
+        var pends = auditData.partidas_pendientes || [];
+        var revCnt = 0;
+        pends.forEach(function(p){
+            if (p.estado_revision === 'CRUZADA_OPCION' || p.estado_revision === 'ANTICIPO_5PASOS') {
+                revCnt++;
+            }
+        });
+        var faltanCnt = pends.length - revCnt;
+        var elRev = document.getElementById("kpiPendRevCount");
+        var elFal = document.getElementById("kpiPendFaltanCount");
+        var cFal = document.getElementById("cPendFaltan");
+        var cRev = document.getElementById("cPendRev");
+        if (elRev) elRev.innerText = revCnt + " de " + pends.length + " listas";
+        if (elFal) elFal.innerText = faltanCnt + " pendientes";
+        if (cFal) cFal.innerText = faltanCnt;
+        if (cRev) cRev.innerText = revCnt;
+    }
+
     function nextOptionPend(pIdx) {
         if (!auditData || !auditData.partidas_pendientes[pIdx]) return;
         var p = auditData.partidas_pendientes[pIdx];
@@ -1718,6 +1923,7 @@ SPA_HTML = """<!DOCTYPE html>
             p.active_opt_idx = (p.modo_inicial === 'ANTICIPO') ? -1 : 0;
         }
         p.confirmada = false;
+        p.estado_revision = 'SIN_REVISAR';
         if (opts.length === 0) {
             p.active_opt_idx = -1;
         } else if (p.active_opt_idx === -1) {
@@ -1728,6 +1934,7 @@ SPA_HTML = """<!DOCTYPE html>
             p.active_opt_idx = -1;
         }
         syncPendRowState(p);
+        saveCurrentAuditToMonth();
         renderPendientesTable();
     }
 
@@ -1736,7 +1943,9 @@ SPA_HTML = """<!DOCTYPE html>
         var p = auditData.partidas_pendientes[pIdx];
         p.active_opt_idx = -1;
         p.confirmada = true;
+        p.estado_revision = 'ANTICIPO_5PASOS';
         syncPendRowState(p);
+        saveCurrentAuditToMonth();
         renderPendientesTable();
     }
 
@@ -1747,25 +1956,46 @@ SPA_HTML = """<!DOCTYPE html>
             p.active_opt_idx = 0;
         }
         p.confirmada = true;
+        p.estado_revision = 'CRUZADA_OPCION';
         syncPendRowState(p);
+        saveCurrentAuditToMonth();
+        renderPendientesTable();
+    }
+
+    function unmarkPend(pIdx) {
+        if (!auditData || !auditData.partidas_pendientes[pIdx]) return;
+        var p = auditData.partidas_pendientes[pIdx];
+        p.confirmada = false;
+        p.estado_revision = 'SIN_REVISAR';
+        syncPendRowState(p);
+        saveCurrentAuditToMonth();
         renderPendientesTable();
     }
 
     function syncPendRowState(p) {
         var opts = p.opciones_similares || [];
-        if (p.active_opt_idx >= 0 && p.active_opt_idx < opts.length) {
+        if (p.estado_revision === 'CRUZADA_OPCION' && p.active_opt_idx >= 0 && p.active_opt_idx < opts.length) {
             var op = opts[p.active_opt_idx];
-            p.tercero = (p.confirmada ? "✅ Confirmado: " : "Sugerido: ") + op.tercero + " (" + op.doc + ")";
-            p.protocolo = "Causar " + (p.tipo === 'INGRESO' ? "Recibo de Caja (RC)" : "Comprobante de Egreso (CE)") + " cruzando con " + op.doc + " de " + op.tercero + " por " + formatMoney(op.valor) + ". " + op.detalle_dif;
-        } else {
+            p.tercero = "✅ YA CRUZADA: " + op.tercero + " (" + op.doc + ")";
+            p.protocolo = "✅ PARTIDA VALIDADA Y CRUZADA: Causar " + (p.tipo === 'INGRESO' ? "Recibo de Caja (RC)" : "Comprobante de Egreso (CE)") + " con " + op.doc + " de " + op.tercero + " por " + formatMoney(op.valor) + ". " + op.detalle_dif;
+        } else if (p.estado_revision === 'ANTICIPO_5PASOS') {
             var ctaAnt = p.tipo === 'INGRESO' ? '280505 Anticipos de Clientes' : '133005 Anticipos a Proveedores / 2505 Nómina';
-            p.tercero = "📌 MANDAR COMO ANTICIPO (" + ctaAnt + ")";
-            p.protocolo = "Aplicar Indicaciones del Programa (Protocolo 5 Pasos): 1) Buscar soporte en Drive -> 2) Grupos WhatsApp -> 3) Contador Yeiner -> 4) Tesorera Paola -> 5) Contabilizar como Anticipo en cuenta " + ctaAnt + ".";
+            p.tercero = "📌 GESTIONADA EN ANTICIPO / 5 PASOS (" + ctaAnt + ")";
+            p.protocolo = "📌 PARTIDA ENVIADA A ANTICIPO / PLAN 5 PASOS: 1) Drive -> 2) Grupos WhatsApp -> 3) Contador Yeiner -> 4) Tesorera Paola -> 5) Contabilizar en " + ctaAnt + ".";
+        } else if (p.active_opt_idx >= 0 && p.active_opt_idx < opts.length) {
+            var op2 = opts[p.active_opt_idx];
+            p.tercero = "Sugerido: " + op2.tercero + " (" + op2.doc + ")";
+            p.protocolo = "Causar " + (p.tipo === 'INGRESO' ? "Recibo de Caja (RC)" : "Comprobante de Egreso (CE)") + " cruzando con " + op2.doc + " de " + op2.tercero + " por " + formatMoney(op2.valor) + ". " + op2.detalle_dif;
+        } else {
+            var ctaAnt2 = p.tipo === 'INGRESO' ? '280505 Anticipos de Clientes' : '133005 Anticipos a Proveedores / 2505 Nómina';
+            p.tercero = "Sugerido: Mandar como Anticipo (" + ctaAnt2 + ")";
+            p.protocolo = "Aplicar Indicaciones del Programa (Protocolo 5 Pasos): 1) Buscar soporte en Drive -> 2) Grupos WhatsApp -> 3) Contador Yeiner -> 4) Tesorera Paola -> 5) Contabilizar como Anticipo en cuenta " + ctaAnt2 + ".";
         }
     }
 
     function renderPendientesTable() {
         if (!auditData) return;
+        updatePendReviewCounters();
         var q = document.getElementById("searchPend").value.toLowerCase();
         var tb = document.getElementById("tbodyTab5");
         tb.innerHTML = "";
@@ -1774,71 +2004,110 @@ SPA_HTML = """<!DOCTYPE html>
             if (typeof p.active_opt_idx === 'undefined') {
                 p.active_opt_idx = (p.modo_inicial === 'ANTICIPO') ? -1 : 0;
             }
-            if (activePendFilter !== 'TODAS' && p.tipo !== activePendFilter) return;
+            if (!p.estado_revision) {
+                p.estado_revision = 'SIN_REVISAR';
+            }
+
+            if (activePendFilter === 'EGRESO' && p.tipo !== 'EGRESO') return;
+            if (activePendFilter === 'INGRESO' && p.tipo !== 'INGRESO') return;
+            if (activePendFilter === 'FALTANTES' && p.estado_revision !== 'SIN_REVISAR') return;
+            if (activePendFilter === 'REVISADAS' && p.estado_revision === 'SIN_REVISAR') return;
             if (q && !p.desc.toLowerCase().includes(q) && !p.tercero.toLowerCase().includes(q) && !p.fecha.includes(q) && !p.valor.toString().includes(q)) return;
 
             var bClass = p.tipo === 'EGRESO' ? 'badge-red' : 'badge-green';
             var opts = p.opciones_similares || [];
-            var tipoDescTag = p.tiene_tercero
-                ? "<span style='background:#EBF5FB; color:#1B4F72; padding:2px 7px; border-radius:4px; font-size:10.5px; font-weight:700;'>👤 Con Tercero en Extracto (Muestra Exacto o Diferencia)</span>"
-                : "<span style='background:#FEF9E7; color:#7D6608; padding:2px 7px; border-radius:4px; font-size:10.5px; font-weight:700;'>🏦 Sin Tercero en Extracto (Regla Dif. <= $1.000)</span>";
 
-            var simHtml = "<div style='margin-bottom:5px;'>" + tipoDescTag + "</div>";
+            var statusPill = "";
+            if (p.estado_revision === 'CRUZADA_OPCION') {
+                statusPill = "<span style='background:#1E8449; color:white; padding:3px 9px; border-radius:12px; font-size:10.5px; font-weight:700; margin-left:6px;'>✅ YA CRUZADA / VALIDADA</span>";
+            } else if (p.estado_revision === 'ANTICIPO_5PASOS') {
+                statusPill = "<span style='background:#D68910; color:white; padding:3px 9px; border-radius:12px; font-size:10.5px; font-weight:700; margin-left:6px;'>📌 EN ANTICIPO / 5 PASOS</span>";
+            } else {
+                statusPill = "<span style='background:#E2E8F0; color:#475569; padding:2px 8px; border-radius:12px; font-size:10px; font-weight:700; margin-left:6px;'>⏳ PENDIENTE POR MARCAR</span>";
+            }
+
+            var tipoDescTag = p.tiene_tercero
+                ? "<span style='background:#EBF5FB; color:#1B4F72; padding:2px 7px; border-radius:4px; font-size:10.5px; font-weight:700;'>👤 Con Tercero en Extracto</span>"
+                : "<span style='background:#FEF9E7; color:#7D6608; padding:2px 7px; border-radius:4px; font-size:10.5px; font-weight:700;'>🏦 Sin Tercero (Regla Dif. <= $1.000)</span>";
+
+            var simHtml = "<div style='margin-bottom:5px; display:flex; align-items:center; flex-wrap:wrap;'>" + tipoDescTag + statusPill + "</div>";
+
+            var boxBg = "#F8FAFC";
+            var boxBorder = "#DCE4EC";
+            if (p.estado_revision === 'CRUZADA_OPCION') {
+                boxBg = "#A9DFBF";
+                boxBorder = "#1E8449";
+            } else if (p.estado_revision === 'ANTICIPO_5PASOS') {
+                boxBg = "#F9E79F";
+                boxBorder = "#D68910";
+            }
 
             if (p.active_opt_idx >= 0 && p.active_opt_idx < opts.length) {
                 var op = opts[p.active_opt_idx];
-                var tagColor = op.dif <= 1.0 ? '#27AE60' : (op.dif <= 1000.0 ? '#16A085' : '#2980B9');
+                var tagColor = op.dif <= 1.0 ? '#1E8449' : (op.dif <= 1000.0 ? '#16A085' : '#1F618D');
                 var warnBanner = (!p.tiene_tercero && op.dif > 1000.0)
                     ? "<div style='background:#FDEDEC; color:#922B21; padding:3px 7px; border-radius:3px; font-size:10.5px; font-weight:600; margin-bottom:4px;'>⚠️ Supera $1.000 de diferencia sin tercero en extracto (Exploración manual)</div>"
                     : "";
-                var confBanner = p.confirmada
-                    ? "<span style='background:#D4EFDF; color:#196F3D; padding:2px 6px; border-radius:4px; font-size:10px; font-weight:700; margin-left:6px;'>✅ OPCIÓN ELEGIDA</span>"
-                    : "";
 
-                simHtml += "<div style='background:" + (p.confirmada ? "#EAFAF1" : "#F8FAFC") + "; border:1px solid #DCE4EC; border-left:4px solid " + tagColor + "; padding:8px 10px; border-radius:5px; margin-bottom:6px; font-size:11.5px;'>" +
+                simHtml += "<div style='background:" + boxBg + "; border:2px solid " + boxBorder + "; border-left:6px solid " + tagColor + "; padding:9px 11px; border-radius:6px; margin-bottom:6px; font-size:11.5px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>" +
                            warnBanner +
                            "<div style='display:flex; justify-content:space-between; align-items:center; font-weight:700; color:#1B365D;'>" +
-                           "<span>Opción " + (p.active_opt_idx + 1) + " de " + opts.length + ": " + op.tercero + " (" + op.doc + ")" + confBanner + "</span>" +
+                           "<span>Opción " + (p.active_opt_idx + 1) + " de " + opts.length + ": " + op.tercero + " (" + op.doc + ")</span>" +
                            "<span style='color:" + tagColor + "; font-size:12px;'>Doc: " + formatMoney(op.valor) + "</span>" +
                            "</div>" +
                            "<div style='color:" + tagColor + "; font-weight:700; font-size:11px; margin-top:3px;'>" + op.detalle_dif + "</div>" +
-                           "<div style='color:#64748B; font-size:11px; margin-top:2px;'>" + op.origen + " | Fecha: " + op.fecha + " | " + op.concepto + "</div>" +
+                           "<div style='color:#334155; font-size:11px; margin-top:2px;'>" + op.origen + " | Fecha: " + op.fecha + " | " + op.concepto + "</div>" +
                            "</div>";
             } else {
                 var ctaAnt = p.tipo === 'INGRESO' ? '280505 Anticipos de Clientes' : '133005 Anticipos a Proveedores / 2505 Nómina';
                 var reasonTxt = (!p.tiene_tercero)
                     ? "No hay factura abierta con diferencia <= $1.000 pesos para este movimiento sin nombre de tercero."
-                    : "Se descartaron las opciones sugeridas para este movimiento.";
-                simHtml += "<div style='background:#FEF9E7; border:1px solid #F5B041; border-left:4px solid #E67E22; padding:8px 10px; border-radius:5px; margin-bottom:6px; font-size:11.5px;'>" +
-                           "<div style='font-weight:700; color:#935116;'>📌 MANDAR COMO ANTICIPO (" + ctaAnt + ") O SEGUIR PROTOCOLO 5 PASOS</div>" +
-                           "<div style='color:#5D6D7E; font-size:11px; margin-top:3px;'>" + reasonTxt + "</div>" +
+                    : "Asignado a Anticipo / Plan de 5 Pasos.";
+                var antBg = (p.estado_revision === 'ANTICIPO_5PASOS') ? "#F9E79F" : "#FEF9E7";
+                var antBorder = (p.estado_revision === 'ANTICIPO_5PASOS') ? "#D68910" : "#F5B041";
+                simHtml += "<div style='background:" + antBg + "; border:2px solid " + antBorder + "; border-left:6px solid #D68910; padding:9px 11px; border-radius:6px; margin-bottom:6px; font-size:11.5px;'>" +
+                           "<div style='font-weight:700; color:#7E5109;'>📌 MANDAR COMO ANTICIPO (" + ctaAnt + ") O PLAN 5 PASOS</div>" +
+                           "<div style='color:#475569; font-size:11px; margin-top:3px;'>" + reasonTxt + "</div>" +
                            "</div>";
             }
 
-            // Botones interactivos debajo de la opción
+            // Botones interactivos debajo del cuadro
             simHtml += "<div style='display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;'>";
+            if (p.active_opt_idx >= 0 && p.active_opt_idx < opts.length) {
+                simHtml += "<button type='button' onclick='confirmOptionPend(" + pIdx + ")' style='background:#1E8449; color:white; border:none; padding:6px 10px; border-radius:4px; font-size:11px; font-weight:700; cursor:pointer;'>✅ Validar / Cruzar (Pintar Verde)</button>";
+            }
+            simHtml += "<button type='button' onclick='setAnticipoPend(" + pIdx + ")' style='background:#D68910; color:white; border:none; padding:6px 10px; border-radius:4px; font-size:11px; font-weight:700; cursor:pointer;'>📌 Mandar a Anticipo / 5 Pasos (Pintar Amarillo)</button>";
             if (opts.length > 0) {
                 var btnNextLbl = (p.active_opt_idx === -1)
-                    ? ("🔍 Ver opciones cercanas no conciliadas (" + opts.length + ")")
-                    : ("🔄 No es esta / Siguiente opción (" + ((p.active_opt_idx + 1) % (opts.length + 1) === opts.length ? "Ir a Anticipo" : ("Opción " + (p.active_opt_idx + 2) + "/" + opts.length)) + ")");
-                simHtml += "<button type='button' onclick='nextOptionPend(" + pIdx + ")' style='background:#1B365D; color:white; border:none; padding:5px 9px; border-radius:4px; font-size:11px; font-weight:600; cursor:pointer;'>" + btnNextLbl + "</button>";
-                if (p.active_opt_idx >= 0) {
-                    simHtml += "<button type='button' onclick='confirmOptionPend(" + pIdx + ")' style='background:#27AE60; color:white; border:none; padding:5px 9px; border-radius:4px; font-size:11px; font-weight:600; cursor:pointer;'>✅ Elegir esta</button>";
-                }
+                    ? ("🔍 Ver opciones cercanas (" + opts.length + ")")
+                    : ("🔄 Otra opción (" + ((p.active_opt_idx + 1) % (opts.length + 1) === opts.length ? "Ir a Anticipo" : ((p.active_opt_idx + 2) + "/" + opts.length)) + ")");
+                simHtml += "<button type='button' onclick='nextOptionPend(" + pIdx + ")' style='background:#1B365D; color:white; border:none; padding:6px 10px; border-radius:4px; font-size:11px; font-weight:600; cursor:pointer;'>" + btnNextLbl + "</button>";
             }
-            if (p.active_opt_idx !== -1) {
-                simHtml += "<button type='button' onclick='setAnticipoPend(" + pIdx + ")' style='background:#E67E22; color:white; border:none; padding:5px 9px; border-radius:4px; font-size:11px; font-weight:600; cursor:pointer;'>📌 Mandar a Anticipo / Protocolo</button>";
+            if (p.estado_revision !== 'SIN_REVISAR') {
+                simHtml += "<button type='button' onclick='unmarkPend(" + pIdx + ")' style='background:#64748B; color:white; border:none; padding:6px 9px; border-radius:4px; font-size:11px; font-weight:600; cursor:pointer;'>↩️ Desmarcar</button>";
             }
             simHtml += "</div>";
 
             var tr = document.createElement("tr");
-            tr.innerHTML = "<td>" + p.fecha + "</td>" +
+            if (p.estado_revision === 'CRUZADA_OPCION') {
+                tr.className = "row-cruzada-green";
+            } else if (p.estado_revision === 'ANTICIPO_5PASOS') {
+                tr.className = "row-anticipo-amber";
+            } else {
+                tr.className = "row-sin-revisar";
+            }
+
+            var protoStyle = p.estado_revision === 'CRUZADA_OPCION'
+                ? "background:#A9DFBF; border-left:4px solid #1E8449; color:#145A32; font-weight:600;"
+                : (p.estado_revision === 'ANTICIPO_5PASOS' ? "background:#F9E79F; border-left:4px solid #D68910; color:#7E5109; font-weight:600;" : "");
+
+            tr.innerHTML = "<td><b>" + p.fecha + "</b></td>" +
                            "<td>" + p.desc + "</td>" +
-                           "<td style='text-align: right; font-weight: 700; color: " + (p.tipo === 'EGRESO' ? '#C0392B' : '#27AE60') + ";'>" + formatMoney(p.valor) + "</td>" +
+                           "<td style='text-align: right; font-weight: 700; color: " + (p.tipo === 'EGRESO' ? '#C0392B' : '#1E8449') + ";'>" + formatMoney(p.valor) + "</td>" +
                            "<td><span class='badge-pill " + bClass + "'>" + p.tipo + "</span></td>" +
                            "<td><b>" + p.tercero + "</b></td>" +
                            "<td>" + simHtml + "</td>" +
-                           "<td><div class='protocol-card'>" + p.protocolo + "</div></td>";
+                           "<td><div class='protocol-card' style='" + protoStyle + "'>" + p.protocolo + "</div></td>";
             tb.appendChild(tr);
         });
     }
@@ -2049,13 +2318,19 @@ def build_master_workbook_stream(empresa: str, banco: str, rec: ReconcilerCore) 
 # =====================================================================
 class AppHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        global SESSION_CACHE
         if self.path in ['/', '/index.html']:
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
             self.wfile.write(SPA_HTML.encode('utf-8'))
+        elif self.path == '/listar_meses':
+            saved = SESSION_CACHE.get('saved_months', {})
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps(saved).encode('utf-8'))
         elif self.path == '/descargar_excel':
-            global SESSION_CACHE
             if 'last_workbook' in SESSION_CACHE:
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
@@ -2071,7 +2346,36 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        if self.path == '/procesar_json':
+        global SESSION_CACHE
+        if self.path == '/guardar_mes':
+            try:
+                clen = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(clen).decode('utf-8'))
+                if 'saved_months' not in SESSION_CACHE:
+                    SESSION_CACHE['saved_months'] = {}
+                if body.get('key') and body.get('data'):
+                    SESSION_CACHE['saved_months'][body['key']] = body['data']
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+            except Exception as e:
+                self.send_response(400); self.end_headers()
+            return
+        elif self.path == '/borrar_mes':
+            try:
+                clen = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(clen).decode('utf-8'))
+                if 'saved_months' in SESSION_CACHE and body.get('key') in SESSION_CACHE['saved_months']:
+                    del SESSION_CACHE['saved_months'][body['key']]
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+            except Exception as e:
+                self.send_response(400); self.end_headers()
+            return
+        elif self.path == '/procesar_json':
             try:
                 content_type = self.headers.get('Content-Type')
                 content_length = int(self.headers.get('Content-Length', 0))
@@ -2136,7 +2440,6 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
                     diferencia = 0.0
 
                     excel_stream = build_master_workbook_stream(empresa, banco, rec)
-                    global SESSION_CACHE
                     SESSION_CACHE['last_workbook'] = excel_stream
 
                     response_payload = {
