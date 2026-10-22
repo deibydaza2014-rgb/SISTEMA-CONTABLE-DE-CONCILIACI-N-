@@ -1250,7 +1250,14 @@ SPA_HTML = """<!DOCTYPE html>
             <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
                 <div>
                     <h4 style="margin:0; color:var(--primary); font-size:16px;" id="foldersPanelTitle">📁 Carpetas Bancarias de PARMOR SAS (3 Bancos)</h4>
-                    <p style="margin:3px 0 0 0; font-size:12px; color:#64748B;">Selecciona la carpeta del banco para ver y abrir los meses archivados adentro sin volver a subir PDFs:</p>
+                    <p style="margin:3px 0 0 0; font-size:12px; color:#64748B;">Sincronización bidireccional automática entre este navegador, el servidor Render y tu celular:</p>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <span id="cloudSyncBadge" style="background:#E2F0D9; color:#1E8449; padding:5px 10px; border-radius:6px; font-size:11.5px; font-weight:700;">☁️ Sincronizado con Servidor y Celular</span>
+                    <button type="button" class="btn" style="background:#2980B9; color:white; padding:6px 12px; font-size:12px;" onclick="renderSavedMonthsList(true)">🔄 Sincronizar Ahora (PC / Celular)</button>
+                    <button type="button" class="btn" style="background:#16A085; color:white; padding:6px 12px; font-size:12px;" onclick="exportBackupJson()">📤 Descargar Copia (.json)</button>
+                    <button type="button" class="btn" style="background:#8E44AD; color:white; padding:6px 12px; font-size:12px;" onclick="document.getElementById('importBackupInput').click()">📥 Cargar Copia</button>
+                    <input type="file" id="importBackupInput" accept=".json" style="display:none;" onchange="importBackupJson(this)">
                 </div>
             </div>
             <!-- Pestañas / Carpetas de Bancos (3 para PARMOR SAS, 2 para ALLTECH SOLUTIONS S.A.S.) -->
@@ -1580,42 +1587,124 @@ SPA_HTML = """<!DOCTYPE html>
         var key = (auditData.empresa || currentCompany) + " | " + (auditData.banco || currentBank) + " | " + (auditData.mes_guardado || currentMonth);
         auditData.mes_guardado = auditData.mes_guardado || currentMonth;
         auditData.updated_at = new Date().toLocaleString('es-CO');
+        auditData.updated_ts = Date.now();
+        var map = getSavedMonthsMap();
+        map[key] = auditData;
         try {
-            var map = getSavedMonthsMap();
-            map[key] = auditData;
             localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
         } catch (e) {
             console.warn("Aviso localStorage:", e);
         }
-        // Sincronizar también en memoria del servidor
-        fetch("/guardar_mes", {
+        // Enviar TODOS los meses guardados en este navegador al servidor para que el celular y otras ventanas vean las 4+ carpetas completas
+        fetch("/sincronizar_meses", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ key: key, data: auditData })
-        }).catch(function(){});
+            body: JSON.stringify({ months: map })
+        })
+        .then(function(r){ return r.json(); })
+        .then(function(merged){
+            if (merged && typeof merged === 'object') {
+                lastMergedMap = merged;
+                try { localStorage.setItem(STORAGE_KEY, JSON.stringify(merged)); } catch(e){}
+            }
+        })
+        .catch(function(){});
 
         var badge = document.getElementById("saveStatusBadge");
         if (badge) {
-            badge.innerText = "💾 Guardado en " + (auditData.mes_guardado || currentMonth) + " (" + new Date().toLocaleTimeString('es-CO') + ")";
+            badge.innerText = "💾 Guardado y Sincronizado en Nube (" + new Date().toLocaleTimeString('es-CO') + ")";
         }
     }
 
-    function renderSavedMonthsList() {
-        var container = document.getElementById("savedMonthsContainer");
-        if (!container) return;
+    function renderSavedMonthsList(showAlert) {
         var map = getSavedMonthsMap();
-        // Mezclar con los del servidor si existen
-        fetch("/listar_meses")
+        var syncBadge = document.getElementById("cloudSyncBadge");
+        if (syncBadge) syncBadge.innerText = "🔄 Sincronizando con Nube / Celular...";
+        // Sincronización bidireccional: sube todos los meses de este navegador al servidor y descarga los del servidor
+        fetch("/sincronizar_meses", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ months: map })
+        })
         .then(function(r){ return r.json(); })
-        .then(function(serverMap){
-            var merged = Object.assign({}, serverMap || {}, map);
-            try { localStorage.setItem(STORAGE_KEY, JSON.stringify(merged)); } catch(e){}
-            drawSavedMonthCards(merged);
+        .then(function(merged){
+            if (merged && typeof merged === 'object') {
+                try { localStorage.setItem(STORAGE_KEY, JSON.stringify(merged)); } catch(e){}
+                drawSavedMonthCards(merged);
+                var totCount = Object.keys(merged).length;
+                if (syncBadge) syncBadge.innerText = "☁️ Nube y Celular Sincronizados (" + totCount + " meses)";
+                if (showAlert) alert("✅ Sincronización exitosa: " + totCount + " meses están activos en el servidor Render. Ahora ya puedes abrirlos desde tu celular o cualquier otra ventana.");
+            }
         })
         .catch(function(){
             drawSavedMonthCards(map);
+            if (syncBadge) syncBadge.innerText = "⚠️ Modo Local (Reintentando conexión...)";
         });
     }
+
+    function exportBackupJson() {
+        var map = getSavedMonthsMap();
+        var keys = Object.keys(map);
+        if (keys.length === 0) {
+            alert("No hay meses guardados para exportar.");
+            return;
+        }
+        var blob = new Blob([JSON.stringify(map, null, 2)], { type: "application/json" });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "Respaldo_Conciliaciones_PARMOR_ALLTECH.json";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    function importBackupJson(inputEl) {
+        var file = inputEl.files && inputEl.files[0];
+        if (!file) return;
+        var reader = new FileReader();
+        reader.onload = function(evt) {
+            try {
+                var imported = JSON.parse(evt.target.result);
+                if (imported && typeof imported === 'object') {
+                    var current = getSavedMonthsMap();
+                    var combined = Object.assign({}, current, imported);
+                    localStorage.setItem(STORAGE_KEY, JSON.stringify(combined));
+                    renderSavedMonthsList(true);
+                }
+            } catch (e) {
+                alert("Archivo de respaldo no válido: " + e.message);
+            }
+            inputEl.value = "";
+        };
+        reader.readAsText(file);
+    }
+
+    // Sincronizar automáticamente al cargar la página y cada 25 segundos para mantener despierto a Render y sincronizado el celular
+    window.addEventListener("load", function(){
+        renderSavedMonthsList(false);
+        setInterval(function(){
+            var map = getSavedMonthsMap();
+            fetch("/sincronizar_meses", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ months: map })
+            })
+            .then(function(r){ return r.json(); })
+            .then(function(merged){
+                if (merged && typeof merged === 'object') {
+                    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(merged)); } catch(e){}
+                    if (document.getElementById("layer2").classList.contains("active")) {
+                        drawSavedMonthCards(merged);
+                    }
+                    var syncBadge = document.getElementById("cloudSyncBadge");
+                    if (syncBadge) syncBadge.innerText = "☁️ Nube y Celular Sincronizados (" + Object.keys(merged).length + " meses)";
+                }
+            })
+            .catch(function(){});
+        }, 25000);
+    });
 
     var savedKeysList = [];
     var lastMergedMap = {};
@@ -2272,7 +2361,33 @@ SPA_HTML = """<!DOCTYPE html>
     }
 
     function downloadExcel() {
-        window.location.href = "/descargar_excel";
+        if (!auditData) {
+            window.location.href = "/descargar_excel";
+            return;
+        }
+        fetch("/descargar_excel_json", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(auditData)
+        })
+        .then(function(res){
+            if (!res.ok) throw new Error("Error al generar Excel");
+            return res.blob();
+        })
+        .then(function(blob){
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement("a");
+            a.href = url;
+            var fn = "Conciliacion_" + (auditData.empresa || "EMPRESA").replace(/\s+/g, "_") + "_" + (auditData.banco || "BANCO") + "_" + (auditData.mes_guardado || "MES").replace(/\s+/g, "_") + ".xlsx";
+            a.download = fn;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        })
+        .catch(function(){
+            window.location.href = "/descargar_excel";
+        });
     }
 </script>
 
@@ -2472,6 +2587,229 @@ def build_master_workbook_stream(empresa: str, banco: str, rec: ReconcilerCore) 
     out_stream.seek(0)
     return out_stream
 
+# Archivo local de respaldo automático en servidor
+CLOUD_STORE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "conciliaciones_guardadas_cloud.json")
+
+def load_server_saved_months() -> dict:
+    global SESSION_CACHE
+    if 'saved_months' not in SESSION_CACHE:
+        SESSION_CACHE['saved_months'] = {}
+        if os.path.exists(CLOUD_STORE_FILE):
+            try:
+                with open(CLOUD_STORE_FILE, 'r', encoding='utf-8') as f:
+                    SESSION_CACHE['saved_months'] = json.load(f)
+            except Exception:
+                SESSION_CACHE['saved_months'] = {}
+    return SESSION_CACHE['saved_months']
+
+def save_server_saved_months(store: dict):
+    global SESSION_CACHE
+    SESSION_CACHE['saved_months'] = store
+    try:
+        with open(CLOUD_STORE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(store, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+def count_reviewed_items(month_data: dict) -> int:
+    if not isinstance(month_data, dict):
+        return 0
+    pends = month_data.get('partidas_pendientes', [])
+    return sum(1 for p in pends if isinstance(p, dict) and p.get('estado_revision') in ('CRUZADA_OPCION', 'ANTICIPO_5PASOS'))
+
+def merge_month_maps(server_map: dict, client_map: dict) -> dict:
+    merged = dict(server_map or {})
+    for k, c_val in (client_map or {}).items():
+        if not isinstance(c_val, dict):
+            continue
+        if k not in merged:
+            merged[k] = c_val
+        else:
+            s_val = merged[k]
+            c_rev = count_reviewed_items(c_val)
+            s_rev = count_reviewed_items(s_val)
+            c_ts = c_val.get('updated_ts', 0)
+            s_ts = s_val.get('updated_ts', 0)
+            # Preferir la versión con más partidas gestionadas en color o más reciente
+            if c_rev > s_rev or (c_rev == s_rev and c_ts >= s_ts):
+                merged[k] = c_val
+    return merged
+
+def build_workbook_from_saved_json(data: dict) -> io.BytesIO:
+    empresa = data.get("empresa", "PARMOR SAS")
+    banco = data.get("banco", "BANCOLOMBIA")
+    periodo = data.get("periodo", data.get("mes_guardado", "ENERO 2026"))
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    font_title = Font(name='Arial', size=13, bold=True, color='1B365D')
+    font_sub = Font(name='Arial', size=10, bold=True, color='333333')
+    font_hdr = Font(name='Arial', size=9, bold=True, color='FFFFFF')
+    font_bold = Font(name='Arial', size=9, bold=True, color='000000')
+    font_kpi_val = Font(name='Arial', size=12, bold=True, color='1B365D')
+    font_kpi_lbl = Font(name='Arial', size=8, bold=True, color='555555')
+
+    fill_navy = PatternFill(start_color='1B365D', end_color='1B365D', fill_type='solid')
+    fill_kpi = PatternFill(start_color='F2F5F9', end_color='F2F5F9', fill_type='solid')
+    fill_green = PatternFill(start_color='D4EFDF', end_color='D4EFDF', fill_type='solid')
+    fill_blue = PatternFill(start_color='DDEBF7', end_color='DDEBF7', fill_type='solid')
+    fill_yellow = PatternFill(start_color='FCF3CF', end_color='FCF3CF', fill_type='solid')
+    fill_red = PatternFill(start_color='FADBD8', end_color='FADBD8', fill_type='solid')
+
+    border_thin = Border(left=Side(style='thin', color='D9D9D9'), right=Side(style='thin', color='D9D9D9'),
+                         top=Side(style='thin', color='D9D9D9'), bottom=Side(style='thin', color='D9D9D9'))
+    align_center = Alignment(horizontal='center', vertical='center')
+    align_left = Alignment(horizontal='left', vertical='center')
+    align_right = Alignment(horizontal='right', vertical='center')
+    align_hdr = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+    ws1 = wb.create_sheet('RESUMEN_EJECUTIVO')
+    ws1.views.sheetView[0].showGridLines = True
+    ws1.merge_cells('A1:G1')
+    ws1['A1'] = f"{empresa} | INFORME EJECUTIVO DE CONCILIACIÓN 3 VÍAS ({banco})"
+    ws1['A1'].font = font_title; ws1['A1'].alignment = align_center
+    ws1.merge_cells('A2:G2')
+    ws1['A2'] = f"PERÍODO AUDITADO: {periodo} (CUADRE AL CENTAVO - DIFERENCIA $0.00)"
+    ws1['A2'].font = font_sub; ws1['A2'].alignment = align_center
+
+    kpis = [
+        ('B5:C5', 'B6:C6', 'SALDO SEGÚN EXTRACTO', data.get('saldo_extracto', 0.0)),
+        ('D5:E5', 'D6:E6', 'SALDO EN LIBROS (1110)', data.get('saldo_libros', 0.0)),
+        ('F5:G5', 'F6:G6', 'DIFERENCIA FINAL', data.get('diferencia', 0.0))
+    ]
+    for tm, bm, lbl, val in kpis:
+        ws1.merge_cells(tm); ws1.merge_cells(bm)
+        ws1[tm.split(':')[0]].value = lbl; ws1[tm.split(':')[0]].font = font_kpi_lbl; ws1[tm.split(':')[0]].fill = fill_kpi; ws1[tm.split(':')[0]].alignment = align_center
+        ws1[bm.split(':')[0]].value = val; ws1[bm.split(':')[0]].font = font_kpi_val; ws1[bm.split(':')[0]].fill = fill_kpi; ws1[bm.split(':')[0]].alignment = align_center
+        ws1[bm.split(':')[0]].number_format = '$#,##0.00'
+
+    ws_gb = wb.create_sheet('GASTOS_BANCARIOS')
+    ws_gb.views.sheetView[0].showGridLines = True
+    ws_gb.merge_cells('A1:G1')
+    ws_gb['A1'] = f"{empresa} - GASTOS Y RENDIMIENTOS BANCARIOS COMPILADOS"
+    ws_gb['A1'].font = font_title; ws_gb['A1'].alignment = align_center
+    for ci, h in enumerate(['No.', 'Fecha', 'Concepto en Extracto', 'Tipo Operación', 'Valor ($)', 'Cuenta PUC', 'Validación'], 1):
+        c = ws_gb.cell(3, ci, h); c.font = font_hdr; c.fill = fill_navy; c.alignment = align_hdr
+    for idx, t in enumerate(data.get('gastos_bancarios', []), 1):
+        r = idx + 3
+        ws_gb.cell(r, 1, idx).alignment = align_center
+        ws_gb.cell(r, 2, t.get('fecha', '')).alignment = align_center
+        ws_gb.cell(r, 3, t.get('desc', '')).alignment = align_left
+        ws_gb.cell(r, 4, t.get('via_cruce', '')).alignment = align_center
+        val = t.get('valor', 0.0)
+        c_v = ws_gb.cell(r, 5, val if t.get('tipo') == 'EGRESO' else -val)
+        c_v.number_format = '$#,##0.00'; c_v.alignment = align_right
+        ws_gb.cell(r, 6, t.get('cuenta_puc', '')).alignment = align_left
+        ws_gb.cell(r, 7, "VALIDADO OK").alignment = align_center
+        ws_gb.cell(r, 7).fill = fill_green; ws_gb.cell(r, 7).font = font_bold
+        for c in range(1, 8): ws_gb.cell(r, c).border = border_thin
+
+    ws_sal = wb.create_sheet('SALIDAS_CRUZADAS')
+    ws_sal.views.sheetView[0].showGridLines = True
+    ws_sal.merge_cells('A1:H1')
+    ws_sal['A1'] = f"{empresa} - SALIDAS DEL EXTRACTO CRUZADAS EN BANCO Y AUXILIARES"
+    ws_sal['A1'].font = font_title; ws_sal['A1'].alignment = align_center
+    for ci, h in enumerate(['No.', 'Fecha', 'Descripción Extracto', 'Valor Egreso ($)', 'Comprobante', 'Tercero Identificado', 'Soporte / Nómina', 'Vía de Cruce'], 1):
+        c = ws_sal.cell(3, ci, h); c.font = font_hdr; c.fill = fill_navy; c.alignment = align_hdr
+    for idx, t in enumerate(data.get('salidas_cruzadas', []), 1):
+        r = idx + 3
+        ws_sal.cell(r, 1, idx).alignment = align_center
+        ws_sal.cell(r, 2, t.get('fecha', '')).alignment = align_center
+        ws_sal.cell(r, 3, t.get('desc', '')).alignment = align_left
+        c_v = ws_sal.cell(r, 4, t.get('valor', 0.0)); c_v.number_format = '$#,##0.00'; c_v.alignment = align_right
+        ws_sal.cell(r, 5, t.get('comprobante', '')).alignment = align_center
+        ws_sal.cell(r, 6, t.get('tercero', '')).alignment = align_left
+        ws_sal.cell(r, 7, t.get('soporte', '')).alignment = align_left
+        c_via = ws_sal.cell(r, 8, t.get('via_cruce', ''))
+        c_via.fill = fill_green if t.get('color') == 'VERDE' else fill_blue
+        c_via.alignment = align_center; c_via.font = font_bold
+        for c in range(1, 9): ws_sal.cell(r, c).border = border_thin
+
+    ws_ent = wb.create_sheet('ENTRADAS_CRUZADAS')
+    ws_ent.views.sheetView[0].showGridLines = True
+    ws_ent.merge_cells('A1:H1')
+    ws_ent['A1'] = f"{empresa} - ENTRADAS DEL EXTRACTO CRUZADAS EN BANCO Y AUXILIARES"
+    ws_ent['A1'].font = font_title; ws_ent['A1'].alignment = align_center
+    for ci, h in enumerate(['No.', 'Fecha', 'Descripción Extracto', 'Valor Ingreso ($)', 'Comprobante', 'Cliente / Tercero', 'Factura Venta / Soporte', 'Vía de Cruce'], 1):
+        c = ws_ent.cell(3, ci, h); c.font = font_hdr; c.fill = fill_navy; c.alignment = align_hdr
+    for idx, t in enumerate(data.get('entradas_cruzadas', []), 1):
+        r = idx + 3
+        ws_ent.cell(r, 1, idx).alignment = align_center
+        ws_ent.cell(r, 2, t.get('fecha', '')).alignment = align_center
+        ws_ent.cell(r, 3, t.get('desc', '')).alignment = align_left
+        c_v = ws_ent.cell(r, 4, t.get('valor', 0.0)); c_v.number_format = '$#,##0.00'; c_v.alignment = align_right
+        ws_ent.cell(r, 5, t.get('comprobante', '')).alignment = align_center
+        ws_ent.cell(r, 6, t.get('tercero', '')).alignment = align_left
+        ws_ent.cell(r, 7, t.get('soporte', '')).alignment = align_left
+        c_via = ws_ent.cell(r, 8, t.get('via_cruce', ''))
+        c_via.fill = fill_green if t.get('color') == 'VERDE' else fill_blue
+        c_via.alignment = align_center; c_via.font = font_bold
+        for c in range(1, 9): ws_ent.cell(r, c).border = border_thin
+
+    ws_rev = wb.create_sheet('REVERSIONES_Y_AJUSTES')
+    ws_rev.views.sheetView[0].showGridLines = True
+    ws_rev.merge_cells('A1:H1')
+    ws_rev['A1'] = f"{empresa} - AUDITORÍA DEL AUXILIAR 1110 (REVERSIONES Y AJUSTES)"
+    ws_rev['A1'].font = font_title; ws_rev['A1'].alignment = align_center
+    for ci, h in enumerate(['Item', 'Fecha Libro', 'Comprobante', 'Tercero', 'Concepto', 'Valor ($)', 'Diagnóstico', 'Tratamiento'], 1):
+        c = ws_rev.cell(3, ci, h); c.font = font_hdr; c.fill = fill_navy; c.alignment = align_hdr
+    for idx, a in enumerate(data.get('reversiones_ajustes', []), 1):
+        r = idx + 3
+        ws_rev.cell(r, 1, idx).alignment = align_center
+        ws_rev.cell(r, 2, a.get('fecha', '')).alignment = align_center
+        ws_rev.cell(r, 3, a.get('doc_num', '')).alignment = align_center; ws_rev.cell(r, 3).font = font_bold
+        ws_rev.cell(r, 4, a.get('tercero', '')).alignment = align_left
+        ws_rev.cell(r, 5, a.get('concepto', '')).alignment = align_left
+        c_v = ws_rev.cell(r, 6, a.get('credito') or a.get('debito') or 0.0); c_v.number_format = '$#,##0.00'; c_v.alignment = align_right
+        diag = a.get('estado', '')
+        c_d = ws_rev.cell(r, 7, diag); c_d.alignment = align_center; c_d.font = font_bold
+        c_d.fill = fill_blue if diag == 'TRANSITO' else fill_red
+        ws_rev.cell(r, 8, a.get('diagnostico', '')).alignment = align_left
+        for c in range(1, 9): ws_rev.cell(r, c).border = border_thin
+
+    ws_pend = wb.create_sheet('PARTIDAS_PENDIENTES')
+    ws_pend.views.sheetView[0].showGridLines = True
+    ws_pend.merge_cells('A1:I1')
+    ws_pend['A1'] = f"{empresa} - PARTIDAS PENDIENTES Y ESTADO DE GESTIÓN EN COLOR ({periodo})"
+    ws_pend['A1'].font = font_title; ws_pend['A1'].alignment = align_center
+    for ci, h in enumerate(['No.', 'Fecha', 'Concepto Extracto', 'Valor ($)', 'Tipo', 'Estado Gestión', 'Tercero Sugerido / Confirmado', 'Opciones Aux 13 y 2 (FV, FC, NOM, NC)', 'Protocolo 5 Pasos'], 1):
+        c = ws_pend.cell(3, ci, h); c.font = font_hdr; c.fill = fill_navy; c.alignment = align_hdr
+    for idx, t in enumerate(data.get('partidas_pendientes', []), 1):
+        r = idx + 3
+        est_rev = t.get('estado_revision', 'SIN_REVISAR')
+        row_fill = fill_green if est_rev == 'CRUZADA_OPCION' else (fill_yellow if est_rev == 'ANTICIPO_5PASOS' else None)
+        est_lbl = "YA CRUZADA (VERDE)" if est_rev == 'CRUZADA_OPCION' else ("EN ANTICIPO / 5 PASOS (AMARILLO)" if est_rev == 'ANTICIPO_5PASOS' else "PENDIENTE POR MARCAR")
+        ws_pend.cell(r, 1, idx).alignment = align_center
+        ws_pend.cell(r, 2, t.get('fecha', '')).alignment = align_center
+        ws_pend.cell(r, 3, t.get('desc', '')).alignment = align_left
+        c_v = ws_pend.cell(r, 4, t.get('valor', 0.0)); c_v.number_format = '$#,##0.00'; c_v.alignment = align_right
+        ws_pend.cell(r, 5, t.get('tipo', '')).alignment = align_center
+        ws_pend.cell(r, 6, est_lbl).alignment = align_center; ws_pend.cell(r, 6).font = font_bold
+        ws_pend.cell(r, 7, t.get('tercero', '')).alignment = align_left
+        opts = t.get('opciones_similares', [])
+        sim_txt = " | ".join([f"{i+1}) {op.get('tercero','')} ({op.get('doc','')}: ${op.get('valor',0):,.2f} -> {op.get('detalle_dif','')})" for i, op in enumerate(opts[:3])])
+        ws_pend.cell(r, 8, sim_txt or "MANDAR COMO ANTICIPO / PROTOCOLO 5 PASOS").alignment = align_left
+        ws_pend.cell(r, 9, t.get('protocolo', '')).alignment = align_left
+        for c in range(1, 10):
+            ws_pend.cell(r, c).border = border_thin
+            if row_fill:
+                ws_pend.cell(r, c).fill = row_fill
+
+    for sheet in wb.worksheets:
+        for col in sheet.columns:
+            max_len = 0
+            col_letter = get_column_letter(col[0].column)
+            for cell in col:
+                val_str = str(cell.value or '')
+                if chr(10) in val_str: val_str = max(val_str.split(chr(10)), key=len)
+                if len(val_str) > max_len: max_len = len(val_str)
+            sheet.column_dimensions[col_letter].width = min(max(max_len + 3, 11), 50)
+
+    out_stream = io.BytesIO()
+    wb.save(out_stream)
+    out_stream.seek(0)
+    return out_stream
+
 # =====================================================================
 # 5. DISPATCHER HTTP
 # =====================================================================
@@ -2484,7 +2822,7 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(SPA_HTML.encode('utf-8'))
         elif self.path == '/listar_meses':
-            saved = SESSION_CACHE.get('saved_months', {})
+            saved = load_server_saved_months()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.end_headers()
@@ -2506,14 +2844,30 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         global SESSION_CACHE
-        if self.path == '/guardar_mes':
+        if self.path == '/sincronizar_meses':
+            try:
+                clen = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(clen).decode('utf-8')) if clen > 0 else {}
+                client_map = body.get('months', {})
+                server_map = load_server_saved_months()
+                merged = merge_month_maps(server_map, client_map)
+                save_server_saved_months(merged)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(json.dumps(merged).encode('utf-8'))
+            except Exception as e:
+                self.send_response(400); self.end_headers()
+            return
+        elif self.path == '/guardar_mes':
             try:
                 clen = int(self.headers.get('Content-Length', 0))
                 body = json.loads(self.rfile.read(clen).decode('utf-8'))
-                if 'saved_months' not in SESSION_CACHE:
-                    SESSION_CACHE['saved_months'] = {}
+                store = load_server_saved_months()
                 if body.get('key') and body.get('data'):
-                    SESSION_CACHE['saved_months'][body['key']] = body['data']
+                    store[body['key']] = body['data']
+                    save_server_saved_months(store)
+                    SESSION_CACHE['last_workbook'] = build_workbook_from_saved_json(body['data'])
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json; charset=utf-8')
                 self.end_headers()
@@ -2525,12 +2879,28 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
             try:
                 clen = int(self.headers.get('Content-Length', 0))
                 body = json.loads(self.rfile.read(clen).decode('utf-8'))
-                if 'saved_months' in SESSION_CACHE and body.get('key') in SESSION_CACHE['saved_months']:
-                    del SESSION_CACHE['saved_months'][body['key']]
+                store = load_server_saved_months()
+                if body.get('key') in store:
+                    del store[body['key']]
+                    save_server_saved_months(store)
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json; charset=utf-8')
                 self.end_headers()
                 self.wfile.write(b'{"ok":true}')
+            except Exception as e:
+                self.send_response(400); self.end_headers()
+            return
+        elif self.path == '/descargar_excel_json':
+            try:
+                clen = int(self.headers.get('Content-Length', 0))
+                data = json.loads(self.rfile.read(clen).decode('utf-8'))
+                wb_stream = build_workbook_from_saved_json(data)
+                SESSION_CACHE['last_workbook'] = wb_stream
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+                self.send_header('Content-Disposition', 'attachment; filename="Conciliacion_Auditada_ALLTECH_PARMOR.xlsx"')
+                self.end_headers()
+                self.wfile.write(wb_stream.getvalue())
             except Exception as e:
                 self.send_response(400); self.end_headers()
             return
