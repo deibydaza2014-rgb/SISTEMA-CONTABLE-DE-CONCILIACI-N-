@@ -452,12 +452,57 @@ class ReconcilerCore:
                 t.diagnostico = "Rendimiento liquidado sobre saldo en cuenta de ahorros."
                 t.protocolo = "Causar nota contable de rendimientos financieros."
 
-        # 2. Cruce Inteligente con Auxiliar de Bancos 1110 (1 a 1 y Sumas en Ambas Direcciones)
+        # 2. Cruce Inteligente con Auxiliar de Bancos 1110 (1 a 1, Muchos a 1, 1 a Muchos y Grupo a Grupo)
         import itertools
         from collections import defaultdict
 
+        # Mapa de fechas efectivas de facturas/documentos desde Aux 13 y Aux 2 (para RC/CE causados a cierre de mes 31/01)
+        inv_date_map = {}
+        inv_by_ter_val = {}
+        for a_sub in (self.aux_13 + self.aux_2):
+            if a_sub.fecha_dt and a_sub.doc_num:
+                if a_sub.tipo_doc in ('FV', 'FC', 'FCE', 'NO', 'NOM'):
+                    for num in re.findall(r'\b\d{2,6}\b', a_sub.doc_num):
+                        inv_date_map[num] = a_sub.fecha_dt
+                    val_s = a_sub.debito if a_sub.debito > 0 else a_sub.credito
+                    if a_sub.tercero and val_s > 0:
+                        inv_by_ter_val[(a_sub.tercero.strip().upper()[:12], round(val_s))] = a_sub.fecha_dt
+
+        def _get_eff_date(a_rec) -> Optional[datetime.date]:
+            m_d = re.search(r'(\d{2})/(\d{2})/(\d{4})', a_rec.concepto or '')
+            if m_d:
+                try:
+                    return datetime.date(int(m_d.group(3)), int(m_d.group(2)), int(m_d.group(1)))
+                except ValueError:
+                    pass
+            for num in re.findall(r'\b\d{2,6}\b', a_rec.concepto or ''):
+                if num in inv_date_map:
+                    return inv_date_map[num]
+            val_a = a_rec.debito if a_rec.debito > 0 else a_rec.credito
+            if a_rec.tercero and val_a > 0:
+                k = (a_rec.tercero.strip().upper()[:12], round(val_a))
+                if k in inv_by_ter_val:
+                    return inv_by_ter_val[k]
+            return a_rec.fecha_dt
+
+        eff_dates_1110 = {id(a): _get_eff_date(a) for a in self.aux_1110}
+
+        def _days_between(tx_rec, a_rec) -> int:
+            d1 = abs((tx_rec.fecha_dt - a_rec.fecha_dt).days) if (tx_rec.fecha_dt and a_rec.fecha_dt) else 0
+            eff_d = eff_dates_1110.get(id(a_rec))
+            d2 = abs((tx_rec.fecha_dt - eff_d).days) if (tx_rec.fecha_dt and eff_d) else d1
+            return min(d1, d2)
+
+        def _is_generic_bank_desc(desc_str: str) -> bool:
+            d_u = (desc_str or '').upper()
+            return any(k in d_u for k in [
+                'CONSIGNACION CORRESPONSAL', 'TRANSFERENCIA CTA SUC VIRTUAL',
+                'TRANSFERENCIA DESDE NEQUI', 'TRANSFERENCIAS A NEQUI',
+                'TRASLADO VIRTUAL OTROS BANCOS', 'CONSIG LOCAL EFECTIVO',
+                'DEPOSITO EFECTIVO', 'ABONO CON BRE-B', 'DEP. ELECTRONICO'
+            ])
+
         def _run_1to1_pass(max_window_days: int):
-            # Ordenar todos los pares posibles por menor diferencia de días (0 días primero)
             candidate_pairs = []
             for t_idx, t in enumerate(self.extracto_txs):
                 if t.conciliado: continue
@@ -465,11 +510,14 @@ class ReconcilerCore:
                     if a.conciliado: continue
                     a_val = a.credito if t.tipo == 'EGRESO' else a.debito
                     if abs(t.valor - a_val) <= 2.0:
-                        dias_dif = abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 0
+                        dias_dif = _days_between(t, a)
                         if dias_dif <= max_window_days:
-                            candidate_pairs.append((dias_dif, abs(t.valor - a_val), t_idx, a_idx))
-            candidate_pairs.sort(key=lambda x: (x[0], x[1]))
-            for dias_dif, _, t_idx, a_idx in candidate_pairs:
+                            # Priorizar si el nombre del tercero aparece en la descripción del extracto
+                            ter_words = [w for w in (a.tercero or '').upper().split() if len(w) >= 4]
+                            name_bonus = -5 if any(w in t.desc.upper() for w in ter_words) else 0
+                            candidate_pairs.append((dias_dif + name_bonus, dias_dif, abs(t.valor - a_val), t_idx, a_idx))
+            candidate_pairs.sort(key=lambda x: (x[0], x[1], x[2]))
+            for _, dias_dif, _, t_idx, a_idx in candidate_pairs:
                 t = self.extracto_txs[t_idx]
                 a = self.aux_1110[a_idx]
                 if t.conciliado or a.conciliado:
@@ -484,7 +532,7 @@ class ReconcilerCore:
                 t.protocolo = "Partida conciliada al 100%. No requiere acción."
                 a.conciliado = True
 
-        def _run_sum_matching_pass(max_window_days: int):
+        def _run_sum_matching_pass(max_window_days: int, allow_rounding_tol: bool = False):
             # A) Varios registros del MISMO comprobante en Libro 1110 -> 1 pago en Extracto (ej. rc 3022 con 2 líneas)
             unmatched_by_doc = defaultdict(list)
             for a in self.aux_1110:
@@ -500,7 +548,7 @@ class ReconcilerCore:
                 for t in self.extracto_txs:
                     if t.conciliado or t.tipo != tipo_a: continue
                     if abs(t.valor - grp_sum) <= 2.0:
-                        dias_dif = abs((t.fecha_dt - grp[0].fecha_dt).days) if (t.fecha_dt and grp[0].fecha_dt) else 0
+                        dias_dif = _days_between(t, grp[0])
                         if dias_dif <= max_window_days:
                             parts_str = " + ".join([f"${(x.credito or x.debito):,.2f}" for x in grp])
                             t.conciliado = True; t.color = "VERDE"
@@ -518,31 +566,39 @@ class ReconcilerCore:
             # B) Varios comprobantes separados en Libro 1110 (2, 3 o 4 registros) -> 1 pago en Extracto
             for t in self.extracto_txs:
                 if t.conciliado: continue
+                max_tol_val = (1000.0 if _is_generic_bank_desc(t.desc) else 2.0) if allow_rounding_tol else 2.0
                 cands_1110 = []
                 for a in self.aux_1110:
                     if a.conciliado: continue
                     a_val = a.credito if t.tipo == 'EGRESO' else a.debito
-                    if 0 < a_val < t.valor:
-                        dias_dif = abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 0
+                    if 0 < a_val < t.valor + max_tol_val:
+                        dias_dif = _days_between(t, a)
                         if dias_dif <= max_window_days:
                             cands_1110.append(a)
                 if len(cands_1110) < 2: continue
-                cands_1110.sort(key=lambda a: abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 15)
-                cands_1110 = cands_1110[:18]
+                cands_1110.sort(key=lambda a: _days_between(t, a))
+                cands_1110 = cands_1110[:20]
                 matched_comb = None
                 for r_len in (2, 3, 4):
                     if len(cands_1110) < r_len: continue
                     best_comb = None
-                    best_score = 999999
+                    best_score = 999999999
                     for comb in itertools.combinations(cands_1110, r_len):
                         s_val = sum((x.credito if t.tipo == 'EGRESO' else x.debito) for x in comb)
-                        if abs(s_val - t.valor) <= 2.0:
+                        val_diff = abs(s_val - t.valor)
+                        if val_diff <= max_tol_val:
                             same_ter = len({x.tercero.strip().upper() for x in comb if x.tercero}) == 1
-                            max_span = (max(x.fecha_dt for x in comb) - min(x.fecha_dt for x in comb)).days if all(x.fecha_dt for x in comb) else 0
-                            if not same_ter and max_span > 3:
+                            eff_list = [eff_dates_1110.get(id(x)) or x.fecha_dt for x in comb if (eff_dates_1110.get(id(x)) or x.fecha_dt)]
+                            eff_span = (max(eff_list) - min(eff_list)).days if eff_list else 0
+                            book_span = (max(x.fecha_dt for x in comb) - min(x.fecha_dt for x in comb)).days if all(x.fecha_dt for x in comb) else 0
+                            min_internal_span = min(eff_span, book_span)
+                            if not same_ter and min_internal_span > 2:
                                 continue
-                            avg_d = sum(abs((t.fecha_dt - x.fecha_dt).days) if (t.fecha_dt and x.fecha_dt) else 5 for x in comb)
-                            sc = (0 if same_ter else 100) + max_span * 10 + avg_d
+                            avg_d = sum(_days_between(t, x) for x in comb) / len(comb)
+                            # Si usa tolerancia > $2, exigir que la fecha efectiva coincida muy cerca con el extracto (<= 2 días)
+                            if val_diff > 2.0 and avg_d > 2.5:
+                                continue
+                            sc = val_diff * 50 + (0 if same_ter else 50) + eff_span * 20 + avg_d * 10
                             if sc < best_score:
                                 best_score = sc
                                 best_comb = comb
@@ -550,19 +606,22 @@ class ReconcilerCore:
                         matched_comb = best_comb
                         break
                 if matched_comb is not None:
+                    s_val = sum((x.credito if t.tipo == 'EGRESO' else x.debito) for x in matched_comb)
+                    dif_pesos = t.valor - s_val
+                    dif_label = f" (Dif: {'+' if dif_pesos >= 0 else ''}${dif_pesos:,.2f})" if abs(dif_pesos) > 0.01 else " (Exacto $0.00)"
                     docs_str = " + ".join([x.doc_num for x in matched_comb])
                     vals_str = " + ".join([f"{x.doc_num} (${(x.credito or x.debito):,.2f})" for x in matched_comb])
                     ter_set = []
                     for x in matched_comb:
                         if x.tercero and x.tercero not in ter_set: ter_set.append(x.tercero)
                     t.conciliado = True; t.color = "VERDE"
-                    t.via_cruce = f"Suma de {len(matched_comb)} en Libros -> 1 en Extracto"
+                    t.via_cruce = f"Suma de {len(matched_comb)} en Libros -> 1 en Extracto{dif_label}"
                     t.comprobante = docs_str
-                    t.tercero = " / ".join(ter_set[:2]) or "Tercero Registrado en Libros"
-                    t.soporte = f"Suma en Libros 1110: {vals_str} = ${t.valor:,.2f}"
+                    t.tercero = " / ".join(ter_set[:3]) or "Tercero Registrado en Libros"
+                    t.soporte = f"Suma en Libros 1110: {vals_str} = ${s_val:,.2f} vs Extracto ${t.valor:,.2f}{dif_label}"
                     t.cuenta_puc = "111005 Bancos"
-                    t.diagnostico = "Pagos registrados por separado en libros que sumados dan el valor exacto del extracto."
-                    t.protocolo = "Partida conciliada por suma en libros al 100%."
+                    t.diagnostico = f"Pagos registrados por separado en libros ({docs_str}) que al sumarlos corresponden al pago del extracto{dif_label}."
+                    t.protocolo = "Partida conciliada por suma en libros." if abs(dif_pesos) <= 2.0 else f"Conciliada por suma en libros con ajuste menor de redondeo de ${ abs(dif_pesos):,.2f} pesos."
                     for x in matched_comb:
                         x.conciliado = True
 
@@ -579,25 +638,25 @@ class ReconcilerCore:
                 for t in self.extracto_txs:
                     if t.conciliado or t.tipo != tipo_a: continue
                     if 0 < t.valor < a_val:
-                        dias_dif = abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 0
+                        dias_dif = _days_between(t, a)
                         if dias_dif <= max_window_days:
                             cands_ext.append(t)
                 if len(cands_ext) < 2: continue
-                cands_ext.sort(key=lambda tx: abs((tx.fecha_dt - a.fecha_dt).days) if (tx.fecha_dt and a.fecha_dt) else 15)
+                cands_ext.sort(key=lambda tx: _days_between(tx, a))
                 cands_ext = cands_ext[:18]
 
                 matched_ext_comb = None
                 for r_len in (2, 3, 4):
                     if len(cands_ext) < r_len: continue
                     best_comb = None
-                    best_score = 999999
+                    best_score = 999999999
                     for comb in itertools.combinations(cands_ext, r_len):
                         s_val = sum(tx.valor for tx in comb)
                         if abs(s_val - a_val) <= 2.0:
                             max_span = (max(tx.fecha_dt for tx in comb) - min(tx.fecha_dt for tx in comb)).days if all(tx.fecha_dt for tx in comb) else 0
                             if max_span > 5:
                                 continue
-                            avg_d = sum(abs((tx.fecha_dt - a.fecha_dt).days) if (tx.fecha_dt and a.fecha_dt) else 5 for tx in comb)
+                            avg_d = sum(_days_between(tx, a) for tx in comb) / len(comb)
                             sc = max_span * 15 + avg_d
                             if sc < best_score:
                                 best_score = sc
@@ -619,14 +678,89 @@ class ReconcilerCore:
                         tx.diagnostico = "Pagos separados en el extracto que al sumarlos dan el valor registrado en el Libro de Bancos."
                         tx.protocolo = "Partida conciliada por suma agrupada al 100%. No requiere acción."
 
-        # Fase 1: Cruce 1-a-1 en ventana corta (<= tol_dias, priorizando 0 días de diferencia)
+            # D) Cruce por Suma Grupo-a-Grupo: Varios pagos en Extracto (2 o 3 del mismo día) <-> Varios registros en Libro 1110 (2, 3 o 4)
+            # Ej: 19/01/2026 en Extracto ($3,000,000 + $471,818 = $3,471,818) <-> Libro 1110 (rc 3139 $2,336,000 + rc 3140 $512,200 + rc 3141 $623,618 = $3,471,818)
+            ext_by_date_tipo = defaultdict(list)
+            for t in self.extracto_txs:
+                if not t.conciliado and t.fecha_dt:
+                    ext_by_date_tipo[(t.fecha_dt, t.tipo)].append(t)
+
+            for (f_dt, tipo_m), ext_day_list in list(ext_by_date_tipo.items()):
+                if len(ext_day_list) < 2:
+                    continue
+                # Candidatos en 1110 cuya fecha o fecha efectiva esté dentro de max_window_days
+                cands_1110 = []
+                for a in self.aux_1110:
+                    if a.conciliado: continue
+                    a_val = a.credito if tipo_m == 'EGRESO' else a.debito
+                    if a_val <= 0: continue
+                    eff_d = eff_dates_1110.get(id(a)) or a.fecha_dt
+                    d_min = min(abs((f_dt - a.fecha_dt).days) if a.fecha_dt else 99, abs((f_dt - eff_d).days) if eff_d else 99)
+                    if d_min <= max_window_days:
+                        cands_1110.append(a)
+                if len(cands_1110) < 2:
+                    continue
+                cands_1110.sort(key=lambda a: abs((f_dt - (eff_dates_1110.get(id(a)) or a.fecha_dt)).days))
+                cands_1110 = cands_1110[:16]
+
+                found_group_match = False
+                for r_ext in (2, 3):
+                    if len(ext_day_list) < r_ext or found_group_match: continue
+                    for comb_ext in itertools.combinations(ext_day_list, r_ext):
+                        if any(tx.conciliado for tx in comb_ext): continue
+                        sum_ext = sum(tx.valor for tx in comb_ext)
+                        max_tol_g = (1000.0 if all(_is_generic_bank_desc(tx.desc) for tx in comb_ext) else 2.0) if allow_rounding_tol else 2.0
+                        for r_lib in (2, 3, 4):
+                            if len(cands_1110) < r_lib: continue
+                            for comb_lib in itertools.combinations(cands_1110, r_lib):
+                                if any(a.conciliado for a in comb_lib): continue
+                                sum_lib = sum((a.credito if tipo_m == 'EGRESO' else a.debito) for a in comb_lib)
+                                val_diff = abs(sum_ext - sum_lib)
+                                if val_diff <= max_tol_g:
+                                    eff_list = [eff_dates_1110.get(id(a)) or a.fecha_dt for a in comb_lib if (eff_dates_1110.get(id(a)) or a.fecha_dt)]
+                                    eff_span = (max(eff_list) - min(eff_list)).days if eff_list else 0
+                                    book_span = (max(a.fecha_dt for a in comb_lib) - min(a.fecha_dt for a in comb_lib)).days if all(a.fecha_dt for a in comb_lib) else 0
+                                    if min(eff_span, book_span) > 2:
+                                        continue
+                                    # Si hay diferencia > $2, exigir que la fecha efectiva coincida con la fecha del extracto (<= 2 días)
+                                    avg_eff_d = sum(abs((f_dt - (eff_dates_1110.get(id(a)) or a.fecha_dt)).days) for a in comb_lib) / len(comb_lib)
+                                    if val_diff > 2.0 and avg_eff_d > 2.0:
+                                        continue
+                                    dif_pesos = sum_ext - sum_lib
+                                    dif_label = f" (Dif: {'+' if dif_pesos >= 0 else ''}${dif_pesos:,.2f})" if abs(dif_pesos) > 0.01 else " (Exacto $0.00)"
+                                    docs_str = " + ".join([a.doc_num for a in comb_lib])
+                                    vals_lib_str = " + ".join([f"{a.doc_num} (${(a.credito or a.debito):,.2f})" for a in comb_lib])
+                                    vals_ext_str = " + ".join([f"${tx.valor:,.2f}" for tx in comb_ext])
+                                    ter_set = []
+                                    for a in comb_lib:
+                                        if a.tercero and a.tercero not in ter_set: ter_set.append(a.tercero)
+                                    for a in comb_lib:
+                                        a.conciliado = True; a.estado = "NORMAL"
+                                    for idx_part, tx in enumerate(comb_ext, 1):
+                                        tx.conciliado = True; tx.color = "VERDE"
+                                        tx.via_cruce = f"Suma Grupo ({idx_part}/{len(comb_ext)} Extracto <-> {len(comb_lib)} en Libros){dif_label}"
+                                        tx.comprobante = f"{docs_str} (Total ${sum_lib:,.2f})"
+                                        tx.tercero = " / ".join(ter_set[:3]) or "Terceros Registrados en Libros"
+                                        tx.soporte = f"Suma Extracto ({vals_ext_str} = ${sum_ext:,.2f}) = Suma Libros 1110 ({vals_lib_str} = ${sum_lib:,.2f}){dif_label}"
+                                        tx.cuenta_puc = "111005 Bancos"
+                                        tx.diagnostico = f"Múltiples abonos/cargos del extracto ({vals_ext_str}) equivalen a la suma de los comprobantes ({docs_str}) en libros."
+                                        tx.protocolo = "Partida conciliada por suma agrupada al 100%."
+                                    found_group_match = True
+                                    break
+                            if found_group_match:
+                                break
+                        if found_group_match:
+                            break
+
+        # Fase 1: Cruce 1-a-1 en ventana corta (<= tol_dias, priorizando 0 días de diferencia y fecha efectiva de factura)
         _run_1to1_pass(tol_dias)
-        # Fase 2: Cruce por Suma en ambas direcciones en ventana corta (<= tol_dias + 3)
-        _run_sum_matching_pass(tol_dias + 3)
-        # Fase 3: Cruce 1-a-1 en ventana mensual (hasta 25 días para recibos/comprobantes causados a fin de mes)
-        _run_1to1_pass(25)
-        # Fase 4: Cruce por Suma en ventana mensual (hasta 25 días)
-        _run_sum_matching_pass(25)
+        # Fase 2: Cruce por Suma exacta en ambas direcciones en ventana corta (<= tol_dias + 3)
+        _run_sum_matching_pass(tol_dias + 3, allow_rounding_tol=False)
+        # Fase 3: Cruce 1-a-1 en ventana mensual completa (hasta 31 días para recibos causados el 31 del mes)
+        _run_1to1_pass(31)
+        # Fase 4: Cruce por Suma en ventana mensual completa (hasta 31 días, primero exacto y luego con tolerancia <= $1.000 en corresponsales/efectivo)
+        _run_sum_matching_pass(31, allow_rounding_tol=False)
+        _run_sum_matching_pass(31, allow_rounding_tol=True)
 
         # 3. Subauxiliares (Azul) - Excluyendo estrictamente REM, DREM, RC y CE
         EXCLUDED_DOCS = {'RC', 'CE', 'REM', 'DREM'}
@@ -732,8 +866,6 @@ class ReconcilerCore:
                 t.diagnostico = "Operación sin registro contable previo en auxiliares."
                 t.protocolo = "Aplicar Protocolo 5 Pasos: 1) Drive, 2) Grupos, 3) Contador, 4) Tesorera, 5) Anticipo."
 
-        self._assign_similar_options()
-
         # 4B. Detectar partidas anuladas o reversadas internamente dentro del mismo Auxiliar 1110 (Débito vs Crédito igual)
         unmatched_1110 = [a for a in self.aux_1110 if not a.conciliado]
         for i, a1 in enumerate(unmatched_1110):
@@ -773,6 +905,8 @@ class ReconcilerCore:
                     else:
                         a.estado = "TRANSITO"
                         a.diagnostico = "Consignación o transferencia registrada en contabilidad no acreditada en banco."
+
+        self._assign_similar_options()
 
     def _assign_similar_options(self):
         """
@@ -828,7 +962,7 @@ class ReconcilerCore:
 
         aux13_rc_docs = {a.doc_num.strip().lower() for a in self.aux_13 if a.tipo_doc == 'RC'}
         for a in self.aux_1110:
-            if a.tipo_doc == 'RC' and a.doc_num.strip().lower() not in aux13_rc_docs and a.debito > 0:
+            if a.conciliado and a.tipo_doc == 'RC' and a.doc_num.strip().lower() not in aux13_rc_docs and a.debito > 0:
                 nums = re.findall(r'\b(3\d{3})\b', a.concepto)
                 if nums:
                     for n in nums:
@@ -937,6 +1071,76 @@ class ReconcilerCore:
                             'concepto': f"Suma de {r_len} facturas abiertas ({vals_c})",
                             'valor': s_v
                         })
+
+        # Agregar sumas de 2 o 3 facturas abiertas de la MISMA FECHA en Aux 13 (incluso de distintos clientes, ej. consignaciones conjuntas en corresponsal)
+        fvs_by_date = defaultdict(list)
+        for a in open_fvs:
+            if a.fecha_dt:
+                fvs_by_date[a.fecha_dt].append(a)
+        for f_dt, d_list in fvs_by_date.items():
+            if 2 <= len(d_list) <= 10:
+                for r_len in (2, 3):
+                    if len(d_list) < r_len: continue
+                    for comb in itertools.combinations(d_list, r_len):
+                        if len({x.doc_num for x in comb}) < r_len: continue
+                        s_v = sum((x.debito if x.debito > 0 else x.credito) for x in comb)
+                        docs_c = " + ".join([x.doc_num for x in comb])
+                        ters_c = " + ".join(list(dict.fromkeys([x.tercero for x in comb if x.tercero]))[:3])
+                        vals_c = " + ".join([f"{x.doc_num} (${(x.debito or x.credito):,.0f})" for x in comb])
+                        pool_ing.append({
+                            'origen': f"Aux 13 (Suma {r_len} FV del {comb[0].fecha})",
+                            'doc': docs_c,
+                            'tercero': ters_c or 'Clientes Varios',
+                            'fecha': comb[0].fecha,
+                            'fecha_dt': f_dt,
+                            'concepto': f"Suma de {r_len} facturas del mismo día: {vals_c}",
+                            'valor': s_v
+                        })
+
+        # Agregar SUMAS MIXTAS: 1 Recibo de Caja (RC) ya registrado en 1110 (en Tránsito) + 1 o 2 Facturas Abiertas (FV) en Aux 13
+        # Ej: rc 3142 ($220,870 ya en 1110 - FABRIAUTOMATICAS FE 3397) + FV FE 3399 ($100,750 abierta en Aux 13 - TECNOLOGIA Y ZUSEGURIDAD) = $321,620.00
+        transit_rcs = [a for a in self.aux_1110 if not a.conciliado and a.debito > 0]
+        pending_ing_txs = [x for x in self.extracto_txs if not x.conciliado and x.tipo == 'INGRESO']
+        for r_tr in transit_rcs:
+            r_nums = set(re.findall(r'\b(3\d{3})\b', (r_tr.concepto or '') + ' ' + (r_tr.doc_num or '')))
+            best_diag_score = 999999999
+            for r_len in (1, 2):
+                if len(open_fvs) < r_len: continue
+                for comb_fv in itertools.combinations(open_fvs, r_len):
+                    # No sumar el RC con la misma factura que ya está pagando ese RC
+                    comb_nums = set()
+                    for fv in comb_fv:
+                        comb_nums.update(re.findall(r'\b(3\d{3})\b', fv.doc_num or ''))
+                    if r_nums & comb_nums:
+                        continue
+                    s_fv = sum((fv.debito if fv.debito > 0 else fv.credito) for fv in comb_fv)
+                    total_mix = r_tr.debito + s_fv
+                    for tx in pending_ing_txs:
+                        dif_mix = abs(total_mix - tx.valor)
+                        if dif_mix <= 1000.0:
+                            # Verificar cercanía de fechas entre la factura abierta y el movimiento del extracto (<= 4 días)
+                            if all(fv.fecha_dt and tx.fecha_dt and abs((tx.fecha_dt - fv.fecha_dt).days) <= 4 for fv in comb_fv):
+                                fv_docs = " + ".join([fv.doc_num for fv in comb_fv])
+                                fv_ters = " + ".join([fv.tercero for fv in comb_fv if fv.tercero])
+                                fv_vals = " + ".join([f"{fv.doc_num} (${(fv.debito or fv.credito):,.0f})" for fv in comb_fv])
+                                pool_ing.append({
+                                    'origen': '🔗 Suma Mixta (1110 + Aux 13)',
+                                    'doc': f"{r_tr.doc_num} (ya en 1110) + {fv_docs} (falta RC)",
+                                    'tercero': f"{r_tr.tercero} + {fv_ters}",
+                                    'fecha': comb_fv[0].fecha,
+                                    'fecha_dt': tx.fecha_dt,
+                                    'concepto': f"Suma Mixta: {r_tr.doc_num} (${r_tr.debito:,.0f} ya en 1110) + {fv_vals} (abierta en Aux 13) = ${total_mix:,.0f}",
+                                    'valor': total_mix
+                                })
+                                diag_sc = dif_mix * 100 + r_len * 10
+                                if diag_sc < best_diag_score:
+                                    best_diag_score = diag_sc
+                                    r_tr.diagnostico = (
+                                        f"🔗 SUMA MIXTA IDENTIFICADA CON EXTRACTO ({tx.fecha} por ${tx.valor:,.2f}): "
+                                        f"Este {r_tr.doc_num} (${r_tr.debito:,.2f} - {r_tr.tercero}) + Factura Abierta {fv_docs} "
+                                        f"(${s_fv:,.2f} - {fv_ters}) suman ${total_mix:,.2f} (Dif: ${dif_mix:,.2f}). "
+                                        f"Falta causar el RC de {fv_docs} por ${s_fv:,.2f} para cruzar el pago completo."
+                                    )
 
         # ------------------------------------------------------------------
         # B. Construir pool de EGRESOS (Aux 2) SOLO con FC/FCE/NO/NC NO conciliados
@@ -1133,7 +1337,7 @@ class ReconcilerCore:
                     if 'NOMINA' in d_u and item['doc'].upper().startswith('NO'):
                         name_matched = True
 
-                doc_bonus = (-0.035 if ('NEQUI' in d_u and any(k in item['doc'].upper() for k in ['NO', 'NOM', 'DS'])) else (-0.005 if any(k in item['doc'].upper() for k in ['FV', 'FC', 'FCE', 'NO']) else -0.002))
+                doc_bonus = (-0.045 if 'Suma Mixta' in item['origen'] else (-0.035 if ('NEQUI' in d_u and any(k in item['doc'].upper() for k in ['NO', 'NOM', 'DS'])) else (-0.005 if any(k in item['doc'].upper() for k in ['FV', 'FC', 'FCE', 'NO']) else -0.002)))
                 score = rel_diff + date_penalty + doc_bonus
                 # Priorizar: 1) Exacto + mismo tercero/NIT (-1), 2) Exacto (0), 3) Mismo tercero/NIT (1), 4) Menor diferencia relativa (2)
                 priority = -1 if (diff <= 1.0 and name_matched) else (0 if diff <= 1.0 else (1 if name_matched else 2))
