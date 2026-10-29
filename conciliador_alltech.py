@@ -320,10 +320,15 @@ class PDFMemoryParser:
                     tipo = 'EGRESO'
                 elif '+' in v_str:
                     tipo = 'INGRESO'
-                elif prev_s > 0 and s_val > 0 and abs((prev_s - abs(v)) - s_val) <= 1.0:
-                    tipo = 'EGRESO'
-                elif prev_s > 0 and s_val > 0 and abs((prev_s + abs(v)) - s_val) <= 1.0:
-                    tipo = 'INGRESO'
+                elif prev_s > 0 and s_val > 0:
+                    err_egr = abs((prev_s - abs(v)) - s_val)
+                    err_ing = abs((prev_s + abs(v)) - s_val)
+                    if err_egr < err_ing and err_egr <= 1.0:
+                        tipo = 'EGRESO'
+                    elif err_ing <= 1.0:
+                        tipo = 'INGRESO'
+                    else:
+                        tipo = 'INGRESO' if v > 0 else 'EGRESO'
                 else:
                     tipo = 'INGRESO' if v > 0 else 'EGRESO'
                 prev_s = s_val
@@ -403,54 +408,100 @@ class ReconcilerCore:
         self.aux_2 = aux_2
 
     def execute(self, tol_dias: int = 5):
-        # 1. Detección y clasificación de Gastos, Retenciones y Rendimientos Bancarios (Amarillo) - Multibanco (Bancolombia, BBVA, Davivienda)
+        # 1. Detección y clasificación SEPARADA de Gastos Bancarios, Retenciones e Intereses (Amarillo) - Sin mezclar ningún concepto
         for t in self.extracto_txs:
             d_u = t.desc.upper()
             if any(k in d_u for k in ['4X1000', '4X1.000', 'GRAVAMEN A LOS MOVIMIENTOS FINANCIEROS']):
                 t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "GMF"
-                t.via_cruce = "GMF (4x1000)"
+                t.via_cruce = "GMF 4x1000"
                 t.comprobante = "Extracto Bancario"
                 t.tercero = "ENTIDAD FINANCIERA"
-                t.soporte = "Impuesto Gravamen Movimiento Financiero"
-                t.cuenta_puc = "53051501 Gasto GMF"
+                t.soporte = "Impuesto Gravamen a los Movimientos Financieros (4x1000)"
+                t.cuenta_puc = "53051501 Gasto GMF 4x1000"
                 t.diagnostico = "Débito automático bancario por impuesto 4x1000."
-                t.protocolo = "Causar nota de contabilidad de impuesto GMF."
-            elif any(k in d_u for k in ['CARGO RETEFUENTE COMERCIO', 'CARGO RETE IVA COMERCIO', 'CARGO RETE ICA COMERCIO']):
-                t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "COMISION"
-                t.via_cruce = "Retención Datáfono (ReteFuente/IVA/ICA)"
-                t.comprobante = "Extracto Bancario BBVA"
-                t.tercero = "BBVA COLOMBIA / DIAN / SHD"
-                t.soporte = "Retención practicada en ventas con tarjeta/datáfono"
-                t.cuenta_puc = "135515 Retefuente / 135517 ReteIVA / 135518 ReteICA"
-                t.diagnostico = "Retención automática descontada por el banco en abonos de datáfono."
-                t.protocolo = "Causar nota contable de retenciones a favor por ventas de datáfono."
+                t.protocolo = "Causar en cuenta 53051501 (Gasto GMF 4x1000) por separado."
+            elif 'CARGO RETEFUENTE COMERCIO' in d_u or 'RETEFUENTE COMERCIO' in d_u:
+                t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "RETEFUENTE"
+                t.via_cruce = "ReteFuente Datáfono"
+                t.comprobante = "Extracto Bancario"
+                t.tercero = "DIAN / ENTIDAD FINANCIERA"
+                t.soporte = "Retención en la Fuente practicada en abonos de datáfono"
+                t.cuenta_puc = "135515 Retención en la Fuente (Datáfono)"
+                t.diagnostico = "Retención en la fuente descontada por separado en ventas con tarjeta."
+                t.protocolo = "Causar en cuenta 135515 (Anticipo ReteFuente) por separado."
+            elif 'CARGO RETE IVA COMERCIO' in d_u or 'RETE IVA COMERCIO' in d_u:
+                t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "RETEIVA"
+                t.via_cruce = "ReteIVA Datáfono"
+                t.comprobante = "Extracto Bancario"
+                t.tercero = "DIAN / ENTIDAD FINANCIERA"
+                t.soporte = "Retención de IVA practicada en abonos de datáfono"
+                t.cuenta_puc = "135517 Retención de IVA - ReteIVA (Datáfono)"
+                t.diagnostico = "Retención de IVA descontada por separado en ventas con tarjeta."
+                t.protocolo = "Causar en cuenta 135517 (Anticipo ReteIVA) por separado."
+            elif 'CARGO RETE ICA COMERCIO' in d_u or 'RETE ICA COMERCIO' in d_u:
+                t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "RETEICA"
+                t.via_cruce = "ReteICA Datáfono"
+                t.comprobante = "Extracto Bancario"
+                t.tercero = "SECRETARÍA DE HACIENDA / BANCO"
+                t.soporte = "Retención de ICA practicada en abonos de datáfono"
+                t.cuenta_puc = "135518 Retención de ICA - ReteICA (Datáfono)"
+                t.diagnostico = "Retención de ICA descontada por separado en ventas con tarjeta."
+                t.protocolo = "Causar en cuenta 135518 (Anticipo ReteICA) por separado."
             elif 'IVA' in d_u and not any(k in d_u for k in ['RETE IVA', 'DERECHOS ADUANALES']):
                 t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "IVA"
-                t.via_cruce = "IVA Bancario"
+                t.via_cruce = "IVA Bancario (19%)"
                 t.comprobante = "Extracto Bancario"
                 t.tercero = "ENTIDAD FINANCIERA"
-                t.soporte = "IVA 19% Comisiones y Servicios Bancarios"
-                t.cuenta_puc = "24080203 IVA Descontable Servicios"
+                t.soporte = "IVA 19% sobre Comisiones y Cuota de Manejo"
+                t.cuenta_puc = "24080203 IVA Descontable Gastos Bancarios"
                 t.diagnostico = "IVA generado por servicios bancarios facturados."
-                t.protocolo = "Registrar con extracto / factura electrónica bancaria."
-            elif any(k in d_u for k in ['CANAL NEGOCIOS', 'COMISION', 'COBRO COMI', 'CUOTA DE MANEJO', 'CUOTA MANEJO', 'COBRO CUOTA', 'MANEJO PORTAL', 'COBRO SERVICIO', 'COBRO TRANSF', 'PLAN CANAL']) and not any(k in d_u for k in ['CUOTA CREDITO', 'CUOTA DE CREDITO', 'PLANILLA']):
+                t.protocolo = "Causar en cuenta 24080203 (IVA Bancario) por separado."
+            elif any(k in d_u for k in ['MANEJO PORTAL', 'COBRO SERVICIO', 'PORTAL PYMES', 'SERVICIO MANEJO']) and not any(k in d_u for k in ['CUOTA CREDITO', 'CUOTA DE CREDITO', 'PLANILLA', 'COBRO TRANSF']):
+                t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "PORTAL"
+                t.via_cruce = "Servicio Manejo Portal"
+                t.comprobante = "Extracto Bancario"
+                t.tercero = "ENTIDAD FINANCIERA"
+                t.soporte = "Cobro Servicio Manejo Portal Empresarial"
+                t.cuenta_puc = "53051503 Servicio Manejo Portal Bancario"
+                t.diagnostico = "Cobro administrativo por servicio de portal bancario."
+                t.protocolo = "Causar en cuenta 53051503 (Servicio Manejo Portal) por separado."
+            elif any(k in d_u for k in ['CANAL NEGOCIOS', 'CUOTA DE MANEJO', 'CUOTA MANEJO', 'COBRO CUOTA', 'PLAN CANAL']) and not any(k in d_u for k in ['CUOTA CREDITO', 'CUOTA DE CREDITO', 'PLANILLA']):
+                t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "CUOTA_MANEJO"
+                t.via_cruce = "Cuota de Manejo"
+                t.comprobante = "Extracto Bancario"
+                t.tercero = "ENTIDAD FINANCIERA"
+                t.soporte = "Cuota de Manejo Tarjeta / Cuenta / Plan Canal"
+                t.cuenta_puc = "53051502 Cuota de Manejo Bancaria"
+                t.diagnostico = "Cobro periódico por cuota de manejo bancaria."
+                t.protocolo = "Causar en cuenta 53051502 (Cuota de Manejo) por separado."
+            elif any(k in d_u for k in ['COMISION', 'COBRO COMI', 'COBRO TRANSF']) and not any(k in d_u for k in ['CUOTA CREDITO', 'CUOTA DE CREDITO', 'PLANILLA']):
                 t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "COMISION"
-                t.via_cruce = "Comisión / Cuota Manejo"
+                t.via_cruce = "Comisión Transaccional"
                 t.comprobante = "Extracto Bancario"
                 t.tercero = "ENTIDAD FINANCIERA"
-                t.soporte = "Comisiones y Cuota de Manejo / Portal / ACH"
+                t.soporte = "Comisión por Transferencia / Giro / Abono Datáfono"
                 t.cuenta_puc = "53051505 Comisiones Bancarias"
-                t.diagnostico = "Cobro administrativo bancario por manejo o transacción."
-                t.protocolo = "Registrar en gastos bancarios (530515)."
+                t.diagnostico = "Comisión bancaria por transacción o dispersión."
+                t.protocolo = "Causar en cuenta 53051505 (Comisiones Bancarias) por separado."
             elif any(k in d_u for k in ['INTERES', 'RENDIMIENTO', 'RENDIMIENTOS FINANCIEROS']):
-                t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "INTERES"
-                t.via_cruce = "Rendimiento Financiero"
-                t.comprobante = "Extracto Bancario"
-                t.tercero = "ENTIDAD FINANCIERA"
-                t.soporte = "Abono Rendimientos de Ahorros"
-                t.cuenta_puc = "42100501 Ingresos Financieros"
-                t.diagnostico = "Rendimiento liquidado sobre saldo en cuenta de ahorros."
-                t.protocolo = "Causar nota contable de rendimientos financieros."
+                if t.tipo == 'EGRESO' or 'AJUSTE' in d_u or 'DB' in d_u.split():
+                    t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "AJUSTE_INTERES"
+                    t.via_cruce = "Ajuste Débito Intereses"
+                    t.comprobante = "Extracto Bancario"
+                    t.tercero = "ENTIDAD FINANCIERA"
+                    t.soporte = "Ajuste Débito sobre Intereses de Ahorros"
+                    t.cuenta_puc = "42100501 / 5305 Ajuste Débito Intereses"
+                    t.diagnostico = "Cargo por ajuste de centavos en liquidación de intereses."
+                    t.protocolo = "Registrar ajuste débito de intereses por separado."
+                else:
+                    t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "INTERES"
+                    t.via_cruce = "Intereses / Rendimientos Ganados"
+                    t.comprobante = "Extracto Bancario"
+                    t.tercero = "ENTIDAD FINANCIERA"
+                    t.soporte = "Abono de Intereses / Rendimientos de Cuenta de Ahorros"
+                    t.cuenta_puc = "42100501 Ingresos Financieros (Intereses)"
+                    t.diagnostico = "Rendimiento financiero abonado en cuenta de ahorros."
+                    t.protocolo = "Causar en cuenta 42100501 (Ingresos Financieros) por separado, sin cruzar con gastos."
 
         # 2. Cruce directo con Auxiliar 1110 (Verde)
         for t in self.extracto_txs:
@@ -1354,39 +1405,65 @@ SPA_HTML = """<!DOCTYPE html>
         </div>
 
         <!-- ========================================================= -->
-        <!-- PESTAÑA 1: GASTOS BANCARIOS CON FILTRO Y TOTALES          -->
+        <!-- PESTAÑA 1: GASTOS BANCARIOS, RETENCIONES E INTERESES      -->
         <!-- ========================================================= -->
         <div class="tab-content active" id="tab1">
-            <div class="sub-kpi-row">
+            <div class="sub-kpi-row" style="grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));">
                 <div class="sub-kpi" style="border-left-color: #E67E22;">
-                    <span>Total GMF 4x1000:</span>
+                    <span>1. GMF 4x1000 (53051501):</span>
                     <b id="subKpiGmf">$0.00</b>
                 </div>
                 <div class="sub-kpi" style="border-left-color: #2980B9;">
-                    <span>Comisiones y Manejo:</span>
+                    <span>2. Comisiones (53051505):</span>
                     <b id="subKpiCom">$0.00</b>
                 </div>
+                <div class="sub-kpi" style="border-left-color: #3498DB;">
+                    <span>3. Cuota de Manejo (53051502):</span>
+                    <b id="subKpiCuota">$0.00</b>
+                </div>
+                <div class="sub-kpi" style="border-left-color: #16A085;">
+                    <span>4. Servicio Manejo Portal (53051503):</span>
+                    <b id="subKpiPortal">$0.00</b>
+                </div>
                 <div class="sub-kpi" style="border-left-color: #8E44AD;">
-                    <span>IVA Comisiones (19%):</span>
+                    <span>4. IVA Bancario (24080203):</span>
                     <b id="subKpiIva">$0.00</b>
                 </div>
-                <div class="sub-kpi" style="border-left-color: #27AE60;">
-                    <span>Rendimientos / Intereses:</span>
-                    <b id="subKpiInt">$0.00</b>
+                <div class="sub-kpi" style="border-left-color: #D35400;">
+                    <span>5. ReteFuente Datáfono (135515):</span>
+                    <b id="subKpiReteFte">$0.00</b>
                 </div>
-                <div class="sub-kpi" style="border-left-color: #1B365D;">
-                    <span>Total Neto de Gastos:</span>
-                    <b id="subKpiNeto">$0.00</b>
+                <div class="sub-kpi" style="border-left-color: #C0392B;">
+                    <span>6. ReteIVA Datáfono (135517):</span>
+                    <b id="subKpiReteIva">$0.00</b>
+                </div>
+                <div class="sub-kpi" style="border-left-color: #A04000;">
+                    <span>7. ReteICA Datáfono (135518):</span>
+                    <b id="subKpiReteIca">$0.00</b>
+                </div>
+                <div class="sub-kpi" style="border-left-color: #27AE60; background: #EAFAF1;">
+                    <span>8. Intereses Ganados (42100501):</span>
+                    <b id="subKpiInt" style="color: #1E8449;">$0.00</b>
+                </div>
+                <div class="sub-kpi" style="border-left-color: #7F8C8D;">
+                    <span>9. Ajuste Débito Intereses:</span>
+                    <b id="subKpiAjInt">$0.00</b>
                 </div>
             </div>
 
             <div class="filter-toolbar">
                 <div class="filter-buttons">
                     <span class="filter-chip active" onclick="filterGastos('TODOS', this)">Ver Todos (<span id="cGbAll">0</span>)</span>
-                    <span class="filter-chip" onclick="filterGastos('GMF', this)">GMF 4x1000 (<span id="cGbGmf">0</span>)</span>
-                    <span class="filter-chip" onclick="filterGastos('COMISION', this)">Comisiones / Manejo (<span id="cGbCom">0</span>)</span>
-                    <span class="filter-chip" onclick="filterGastos('IVA', this)">IVA Bancario (<span id="cGbIva">0</span>)</span>
-                    <span class="filter-chip" onclick="filterGastos('INTERES', this)">Intereses Ganados (<span id="cGbInt">0</span>)</span>
+                    <span class="filter-chip" onclick="filterGastos('GMF', this)">1. GMF 4x1000 (<span id="cGbGmf">0</span>)</span>
+                    <span class="filter-chip" onclick="filterGastos('COMISION', this)">2. Comisiones (<span id="cGbCom">0</span>)</span>
+                    <span class="filter-chip" onclick="filterGastos('CUOTA_MANEJO', this)">3. Cuota Manejo (<span id="cGbCuota">0</span>)</span>
+                    <span class="filter-chip" onclick="filterGastos('PORTAL', this)">4. Manejo Portal (<span id="cGbPortal">0</span>)</span>
+                    <span class="filter-chip" onclick="filterGastos('IVA', this)">4. IVA Bancario (<span id="cGbIva">0</span>)</span>
+                    <span class="filter-chip" onclick="filterGastos('RETEFUENTE', this)">5. ReteFuente (<span id="cGbReteFte">0</span>)</span>
+                    <span class="filter-chip" onclick="filterGastos('RETEIVA', this)">6. ReteIVA (<span id="cGbReteIva">0</span>)</span>
+                    <span class="filter-chip" onclick="filterGastos('RETEICA', this)">7. ReteICA (<span id="cGbReteIca">0</span>)</span>
+                    <span class="filter-chip chip-success" onclick="filterGastos('INTERES', this)">8. Intereses Ganados (<span id="cGbInt">0</span>)</span>
+                    <span class="filter-chip" onclick="filterGastos('AJUSTE_INTERES', this)">9. Ajuste Débito Int. (<span id="cGbAjInt">0</span>)</span>
                 </div>
                 <input type="text" class="search-box" id="searchGb" placeholder="Buscar concepto o valor..." onkeyup="renderGastosTable()">
             </div>
@@ -1989,26 +2066,103 @@ SPA_HTML = """<!DOCTYPE html>
         document.getElementById("bCount4").innerText = data.reversiones_ajustes.length;
         document.getElementById("bCount5").innerText = data.partidas_pendientes.length;
 
-        // Render Pestaña 1
-        var gmfSum = 0, comSum = 0, ivaSum = 0, intSum = 0;
-        var gmfCnt = 0, comCnt = 0, ivaCnt = 0, intCnt = 0;
+        // Normalizar y separar gastos bancarios, retenciones e intereses (incluso para meses ya guardados antes)
+        (data.gastos_bancarios || []).forEach(function(g){
+            var du = (g.desc || "").toUpperCase();
+            if (du.includes("4X1000") || du.includes("4X1.000") || du.includes("GRAVAMEN A LOS MOVIMIENTOS FINANCIEROS")) {
+                g.subcategoria = "GMF";
+                g.via_cruce = "GMF 4x1000";
+                g.cuenta_puc = "53051501 Gasto GMF 4x1000";
+                g.protocolo = "Causar en cuenta 53051501 (Gasto GMF 4x1000) por separado.";
+            } else if (du.includes("RETEFUENTE COMERCIO")) {
+                g.subcategoria = "RETEFUENTE";
+                g.via_cruce = "ReteFuente Datáfono";
+                g.cuenta_puc = "135515 Retención en la Fuente (Datáfono)";
+                g.protocolo = "Causar en cuenta 135515 (Anticipo ReteFuente) por separado.";
+            } else if (du.includes("RETE IVA COMERCIO")) {
+                g.subcategoria = "RETEIVA";
+                g.via_cruce = "ReteIVA Datáfono";
+                g.cuenta_puc = "135517 Retención de IVA - ReteIVA (Datáfono)";
+                g.protocolo = "Causar en cuenta 135517 (Anticipo ReteIVA) por separado.";
+            } else if (du.includes("RETE ICA COMERCIO")) {
+                g.subcategoria = "RETEICA";
+                g.via_cruce = "ReteICA Datáfono";
+                g.cuenta_puc = "135518 Retención de ICA - ReteICA (Datáfono)";
+                g.protocolo = "Causar en cuenta 135518 (Anticipo ReteICA) por separado.";
+            } else if (du.includes("IVA") && !du.includes("RETE IVA")) {
+                g.subcategoria = "IVA";
+                g.via_cruce = "IVA Bancario (19%)";
+                g.cuenta_puc = "24080203 IVA Descontable Gastos Bancarios";
+                g.protocolo = "Causar en cuenta 24080203 (IVA Bancario) por separado.";
+            } else if (du.includes("MANEJO PORTAL") || du.includes("COBRO SERVICIO")) {
+                g.subcategoria = "PORTAL";
+                g.via_cruce = "Servicio Manejo Portal";
+                g.cuenta_puc = "53051503 Servicio Manejo Portal Bancario";
+                g.protocolo = "Causar en cuenta 53051503 (Servicio Manejo Portal) por separado.";
+            } else if (du.includes("CANAL NEGOCIOS") || du.includes("CUOTA DE MANEJO") || du.includes("CUOTA MANEJO") || du.includes("COBRO CUOTA") || du.includes("PLAN CANAL")) {
+                g.subcategoria = "CUOTA_MANEJO";
+                g.via_cruce = "Cuota de Manejo";
+                g.cuenta_puc = "53051502 Cuota de Manejo Bancaria";
+                g.protocolo = "Causar en cuenta 53051502 (Cuota de Manejo) por separado.";
+            } else if (du.includes("COMISION") || du.includes("COBRO COMI") || du.includes("COBRO TRANSF")) {
+                g.subcategoria = "COMISION";
+                g.via_cruce = "Comisión Transaccional";
+                g.cuenta_puc = "53051505 Comisiones Bancarias";
+                g.protocolo = "Causar en cuenta 53051505 (Comisiones Bancarias) por separado.";
+            } else if (du.includes("INTERES") || du.includes("RENDIMIENTO")) {
+                if (du.includes("AJUSTE") || du.endsWith(" DB")) {
+                    g.subcategoria = "AJUSTE_INTERES";
+                    g.tipo = "EGRESO";
+                    g.via_cruce = "Ajuste Débito Intereses";
+                    g.cuenta_puc = "42100501 / 5305 Ajuste Débito Intereses";
+                    g.protocolo = "Registrar ajuste débito de intereses por separado.";
+                } else {
+                    g.subcategoria = "INTERES";
+                    g.tipo = "INGRESO";
+                    g.via_cruce = "Intereses / Rendimientos Ganados";
+                    g.cuenta_puc = "42100501 Ingresos Financieros (Intereses)";
+                    g.protocolo = "Causar en cuenta 42100501 (Ingresos Financieros) por separado, sin cruzar con gastos.";
+                }
+            }
+        });
+
+        // Render Pestaña 1 (Cada categoría 100% separada, sin mezclar ni restar intereses con gastos)
+        var gmfSum = 0, comSum = 0, cuotaSum = 0, portalSum = 0, ivaSum = 0, rfSum = 0, rivaSum = 0, ricaSum = 0, intSum = 0, ajIntSum = 0;
+        var gmfCnt = 0, comCnt = 0, cuotaCnt = 0, portalCnt = 0, ivaCnt = 0, rfCnt = 0, rivaCnt = 0, ricaCnt = 0, intCnt = 0, ajIntCnt = 0;
         data.gastos_bancarios.forEach(function(g){
             if (g.subcategoria === 'GMF') { gmfSum += g.valor; gmfCnt++; }
             else if (g.subcategoria === 'COMISION') { comSum += g.valor; comCnt++; }
+            else if (g.subcategoria === 'CUOTA_MANEJO') { cuotaSum += g.valor; cuotaCnt++; }
+            else if (g.subcategoria === 'PORTAL') { portalSum += g.valor; portalCnt++; }
             else if (g.subcategoria === 'IVA') { ivaSum += g.valor; ivaCnt++; }
+            else if (g.subcategoria === 'RETEFUENTE') { rfSum += g.valor; rfCnt++; }
+            else if (g.subcategoria === 'RETEIVA') { rivaSum += g.valor; rivaCnt++; }
+            else if (g.subcategoria === 'RETEICA') { ricaSum += g.valor; ricaCnt++; }
             else if (g.subcategoria === 'INTERES') { intSum += g.valor; intCnt++; }
+            else if (g.subcategoria === 'AJUSTE_INTERES') { ajIntSum += g.valor; ajIntCnt++; }
         });
-        document.getElementById("subKpiGmf").innerText = formatMoney(gmfSum);
-        document.getElementById("subKpiCom").innerText = formatMoney(comSum);
-        document.getElementById("subKpiIva").innerText = formatMoney(ivaSum);
-        document.getElementById("subKpiInt").innerText = formatMoney(intSum);
-        document.getElementById("subKpiNeto").innerText = formatMoney(gmfSum + comSum + ivaSum - intSum);
+        document.getElementById("subKpiGmf").innerText = formatMoney(gmfSum) + " (" + gmfCnt + ")";
+        document.getElementById("subKpiCom").innerText = formatMoney(comSum) + " (" + comCnt + ")";
+        document.getElementById("subKpiCuota").innerText = formatMoney(cuotaSum) + " (" + cuotaCnt + ")";
+        document.getElementById("subKpiPortal").innerText = formatMoney(portalSum) + " (" + portalCnt + ")";
+        document.getElementById("subKpiIva").innerText = formatMoney(ivaSum) + " (" + ivaCnt + ")";
+        document.getElementById("subKpiReteFte").innerText = formatMoney(rfSum) + " (" + rfCnt + ")";
+        document.getElementById("subKpiReteIva").innerText = formatMoney(rivaSum) + " (" + rivaCnt + ")";
+        document.getElementById("subKpiReteIca").innerText = formatMoney(ricaSum) + " (" + ricaCnt + ")";
+        document.getElementById("subKpiInt").innerText = formatMoney(intSum) + " (" + intCnt + ")";
+        document.getElementById("subKpiAjInt").innerText = formatMoney(ajIntSum) + " (" + ajIntCnt + ")";
 
         document.getElementById("cGbAll").innerText = data.gastos_bancarios.length;
         document.getElementById("cGbGmf").innerText = gmfCnt;
         document.getElementById("cGbCom").innerText = comCnt;
+        document.getElementById("cGbCuota").innerText = cuotaCnt;
+        document.getElementById("cGbPortal").innerText = portalCnt;
         document.getElementById("cGbIva").innerText = ivaCnt;
+        document.getElementById("cGbReteFte").innerText = rfCnt;
+        document.getElementById("cGbReteIva").innerText = rivaCnt;
+        document.getElementById("cGbReteIca").innerText = ricaCnt;
         document.getElementById("cGbInt").innerText = intCnt;
+        document.getElementById("cGbAjInt").innerText = ajIntCnt;
 
         renderGastosTable();
         renderSalidasTable();
@@ -2075,19 +2229,49 @@ SPA_HTML = """<!DOCTYPE html>
         var tb = document.getElementById("tbodyTab1");
         tb.innerHTML = "";
 
-        auditData.gastos_bancarios.forEach(function(g){
-            if (activeGbFilter !== 'TODOS' && g.subcategoria !== activeGbFilter) return;
-            if (q && !g.desc.toLowerCase().includes(q) && !g.fecha.includes(q) && !g.valor.toString().includes(q)) return;
+        var categoriesOrder = [
+            { code: 'GMF', title: '1. IMPUESTO GMF 4x1000 (Cuenta 53051501)', badge: 'badge-yellow' },
+            { code: 'COMISION', title: '2. COMISIONES BANCARIAS TRANSACCIONALES (Cuenta 53051505)', badge: 'badge-blue' },
+            { code: 'CUOTA_MANEJO', title: '3. CUOTA DE MANEJO BANCARIA (Cuenta 53051502)', badge: 'badge-blue' },
+            { code: 'PORTAL', title: '4. SERVICIO MANEJO PORTAL BANCARIO (Cuenta 53051503)', badge: 'badge-blue' },
+            { code: 'IVA', title: '4. IVA DESCONTABLE SOBRE SERVICIOS BANCARIOS 19% (Cuenta 24080203)', badge: 'badge-yellow' },
+            { code: 'RETEFUENTE', title: '5. RETENCIÓN EN LA FUENTE DATÁFONO / COMERCIO (Cuenta 135515)', badge: 'badge-orange' },
+            { code: 'RETEIVA', title: '6. RETENCIÓN DE IVA - RETEIVA DATÁFONO / COMERCIO (Cuenta 135517)', badge: 'badge-orange' },
+            { code: 'RETEICA', title: '7. RETENCIÓN DE ICA - RETEICA DATÁFONO / COMERCIO (Cuenta 135518)', badge: 'badge-orange' },
+            { code: 'INTERES', title: '8. INTERESES Y RENDIMIENTOS FINANCIEROS GANADOS (Cuenta 42100501 - Ingreso)', badge: 'badge-green' },
+            { code: 'AJUSTE_INTERES', title: '9. AJUSTE DÉBITO DE INTERESES (Cargo Centavos)', badge: 'badge-red' }
+        ];
 
-            var tr = document.createElement("tr");
-            tr.innerHTML = "<td>" + g.fecha + "</td>" +
-                           "<td>" + g.desc + "</td>" +
-                           "<td><span class='badge-pill badge-yellow'>" + g.via_cruce + "</span></td>" +
-                           "<td style='text-align: right; font-weight: 600;'>" + formatMoney(g.valor) + "</td>" +
-                           "<td>" + g.cuenta_puc + "</td>" +
-                           "<td><span class='badge-pill badge-green'>VALIDADO OK</span></td>" +
-                           "<td>" + g.protocolo + "</td>";
-            tb.appendChild(tr);
+        categoriesOrder.forEach(function(catObj){
+            if (activeGbFilter !== 'TODOS' && activeGbFilter !== catObj.code) return;
+            var items = auditData.gastos_bancarios.filter(function(g){
+                if (g.subcategoria !== catObj.code) return false;
+                if (q && !g.desc.toLowerCase().includes(q) && !g.fecha.includes(q) && !g.valor.toString().includes(q) && !g.via_cruce.toLowerCase().includes(q)) return false;
+                return true;
+            });
+            if (items.length === 0) return;
+
+            var catSum = 0;
+            items.forEach(function(it){ catSum += it.valor; });
+
+            var trHdr = document.createElement("tr");
+            trHdr.style.background = "#EDF3FA";
+            trHdr.innerHTML = "<td colspan='3' style='font-weight:700; color:#1B365D; padding:10px 12px;'>📂 " + catObj.title + " (" + items.length + " movs)</td>" +
+                              "<td style='text-align:right; font-weight:700; color:#1B365D; padding:10px 12px;'>Subtotal: " + formatMoney(catSum) + "</td>" +
+                              "<td colspan='3' style='font-size:11.5px; color:#475569;'>bloque separado individualmente</td>";
+            tb.appendChild(trHdr);
+
+            items.forEach(function(g){
+                var tr = document.createElement("tr");
+                tr.innerHTML = "<td>" + g.fecha + "</td>" +
+                               "<td>" + g.desc + "</td>" +
+                               "<td><span class='badge-pill " + catObj.badge + "'>" + g.via_cruce + "</span></td>" +
+                               "<td style='text-align: right; font-weight: 600;'>" + formatMoney(g.valor) + "</td>" +
+                               "<td><b>" + g.cuenta_puc + "</b></td>" +
+                               "<td><span class='badge-pill badge-green'>SEPARADO OK</span></td>" +
+                               "<td>" + g.protocolo + "</td>";
+                tb.appendChild(tr);
+            });
         });
     }
 
@@ -2450,28 +2634,55 @@ def build_master_workbook_stream(empresa: str, banco: str, rec: ReconcilerCore) 
         ws1[bm.split(':')[0]].value = val; ws1[bm.split(':')[0]].font = font_kpi_val; ws1[bm.split(':')[0]].fill = fill_kpi; ws1[bm.split(':')[0]].alignment = align_center
         ws1[bm.split(':')[0]].number_format = '$#,##0.00'
 
-    # 2. GASTOS_BANCARIOS
+    # 2. GASTOS_BANCARIOS (SEPARADOS POR CATEGORÍA SIN MEZCLAR NI NETEAR CON INTERESES)
     ws_gb = wb.create_sheet('GASTOS_BANCARIOS')
     ws_gb.views.sheetView[0].showGridLines = True
     ws_gb.merge_cells('A1:G1')
-    ws_gb['A1'] = f"{empresa} - GASTOS Y RENDIMIENTOS BANCARIOS COMPILADOS"
+    ws_gb['A1'] = f"{empresa} - GASTOS BANCARIOS, RETENCIONES E INTERESES SEPARADOS POR CONCEPTO"
     ws_gb['A1'].font = font_title; ws_gb['A1'].alignment = align_center
-    headers_gb = ['No.', 'Fecha', 'Concepto en Extracto', 'Tipo Operación', 'Valor ($)', 'Cuenta PUC', 'Validación']
+    headers_gb = ['No.', 'Fecha', 'Concepto en Extracto', 'Categoría Separada', 'Valor ($)', 'Cuenta PUC', 'Validación']
     for ci, h in enumerate(headers_gb, 1):
         c = ws_gb.cell(3, ci, h); c.font = font_hdr; c.fill = fill_navy; c.alignment = align_hdr
     gb_list = [t for t in rec.extracto_txs if t.color == 'AMARILLO']
-    for idx, t in enumerate(gb_list, 1):
-        r = idx + 3
-        ws_gb.cell(r, 1, idx).alignment = align_center
-        ws_gb.cell(r, 2, t.fecha).alignment = align_center
-        ws_gb.cell(r, 3, t.desc).alignment = align_left
-        ws_gb.cell(r, 4, t.via_cruce).alignment = align_center
-        c_v = ws_gb.cell(r, 5, t.valor if t.tipo == 'EGRESO' else -t.valor)
-        c_v.number_format = '$#,##0.00'; c_v.alignment = align_right
-        ws_gb.cell(r, 6, t.cuenta_puc).alignment = align_left
-        ws_gb.cell(r, 7, "VALIDADO OK").alignment = align_center
-        ws_gb.cell(r, 7).fill = fill_green; ws_gb.cell(r, 7).font = font_bold
-        for c in range(1, 8): ws_gb.cell(r, c).border = border_thin
+    cat_defs = [
+        ('GMF', '1. IMPUESTO GMF 4x1000 (Cuenta 53051501)'),
+        ('COMISION', '2. COMISIONES BANCARIAS TRANSACCIONALES (Cuenta 53051505)'),
+        ('CUOTA_MANEJO', '3. CUOTA DE MANEJO BANCARIA (Cuenta 53051502)'),
+        ('PORTAL', '4. SERVICIO MANEJO PORTAL BANCARIO (Cuenta 53051503)'),
+        ('IVA', '4. IVA BANCARIO DESCONTABLE 19% (Cuenta 24080203)'),
+        ('RETEFUENTE', '5. RETENCIÓN EN LA FUENTE DATÁFONO (Cuenta 135515)'),
+        ('RETEIVA', '6. RETENCIÓN DE IVA - RETEIVA DATÁFONO (Cuenta 135517)'),
+        ('RETEICA', '7. RETENCIÓN DE ICA - RETEICA DATÁFONO (Cuenta 135518)'),
+        ('INTERES', '8. INTERESES Y RENDIMIENTOS FINANCIEROS GANADOS (Cuenta 42100501)'),
+        ('AJUSTE_INTERES', '9. AJUSTE DÉBITO DE INTERESES')
+    ]
+    curr_r = 4
+    item_no = 1
+    for cat_code, cat_title in cat_defs:
+        cat_items = [t for t in gb_list if t.subcategoria == cat_code]
+        if not cat_items:
+            continue
+        ws_gb.merge_cells(start_row=curr_r, start_column=1, end_row=curr_r, end_column=4)
+        ws_gb.cell(curr_r, 1, f"{cat_title} ({len(cat_items)} movimientos)").font = font_bold
+        c_sub = ws_gb.cell(curr_r, 5, sum(x.valor for x in cat_items))
+        c_sub.number_format = '$#,##0.00'; c_sub.font = font_bold; c_sub.alignment = align_right
+        for c in range(1, 8):
+            ws_gb.cell(curr_r, c).fill = fill_blue
+            ws_gb.cell(curr_r, c).border = border_thin
+        curr_r += 1
+        for t in cat_items:
+            ws_gb.cell(curr_r, 1, item_no).alignment = align_center
+            ws_gb.cell(curr_r, 2, t.fecha).alignment = align_center
+            ws_gb.cell(curr_r, 3, t.desc).alignment = align_left
+            ws_gb.cell(curr_r, 4, t.via_cruce).alignment = align_center
+            c_v = ws_gb.cell(curr_r, 5, t.valor)
+            c_v.number_format = '$#,##0.00'; c_v.alignment = align_right
+            ws_gb.cell(curr_r, 6, t.cuenta_puc).alignment = align_left
+            ws_gb.cell(curr_r, 7, "SEPARADO OK").alignment = align_center
+            ws_gb.cell(curr_r, 7).fill = fill_green; ws_gb.cell(curr_r, 7).font = font_bold
+            for c in range(1, 8): ws_gb.cell(curr_r, c).border = border_thin
+            curr_r += 1
+            item_no += 1
 
     # 3. SALIDAS_CRUZADAS
     ws_sal = wb.create_sheet('SALIDAS_CRUZADAS')
@@ -2686,23 +2897,50 @@ def build_workbook_from_saved_json(data: dict) -> io.BytesIO:
     ws_gb = wb.create_sheet('GASTOS_BANCARIOS')
     ws_gb.views.sheetView[0].showGridLines = True
     ws_gb.merge_cells('A1:G1')
-    ws_gb['A1'] = f"{empresa} - GASTOS Y RENDIMIENTOS BANCARIOS COMPILADOS"
+    ws_gb['A1'] = f"{empresa} - GASTOS BANCARIOS, RETENCIONES E INTERESES SEPARADOS POR CONCEPTO"
     ws_gb['A1'].font = font_title; ws_gb['A1'].alignment = align_center
-    for ci, h in enumerate(['No.', 'Fecha', 'Concepto en Extracto', 'Tipo Operación', 'Valor ($)', 'Cuenta PUC', 'Validación'], 1):
+    for ci, h in enumerate(['No.', 'Fecha', 'Concepto en Extracto', 'Categoría Separada', 'Valor ($)', 'Cuenta PUC', 'Validación'], 1):
         c = ws_gb.cell(3, ci, h); c.font = font_hdr; c.fill = fill_navy; c.alignment = align_hdr
-    for idx, t in enumerate(data.get('gastos_bancarios', []), 1):
-        r = idx + 3
-        ws_gb.cell(r, 1, idx).alignment = align_center
-        ws_gb.cell(r, 2, t.get('fecha', '')).alignment = align_center
-        ws_gb.cell(r, 3, t.get('desc', '')).alignment = align_left
-        ws_gb.cell(r, 4, t.get('via_cruce', '')).alignment = align_center
-        val = t.get('valor', 0.0)
-        c_v = ws_gb.cell(r, 5, val if t.get('tipo') == 'EGRESO' else -val)
-        c_v.number_format = '$#,##0.00'; c_v.alignment = align_right
-        ws_gb.cell(r, 6, t.get('cuenta_puc', '')).alignment = align_left
-        ws_gb.cell(r, 7, "VALIDADO OK").alignment = align_center
-        ws_gb.cell(r, 7).fill = fill_green; ws_gb.cell(r, 7).font = font_bold
-        for c in range(1, 8): ws_gb.cell(r, c).border = border_thin
+    gb_saved = data.get('gastos_bancarios', [])
+    cat_defs_saved = [
+        ('GMF', '1. IMPUESTO GMF 4x1000 (Cuenta 53051501)'),
+        ('COMISION', '2. COMISIONES BANCARIAS TRANSACCIONALES (Cuenta 53051505)'),
+        ('CUOTA_MANEJO', '3. CUOTA DE MANEJO BANCARIA (Cuenta 53051502)'),
+        ('PORTAL', '4. SERVICIO MANEJO PORTAL BANCARIO (Cuenta 53051503)'),
+        ('IVA', '4. IVA BANCARIO DESCONTABLE 19% (Cuenta 24080203)'),
+        ('RETEFUENTE', '5. RETENCIÓN EN LA FUENTE DATÁFONO (Cuenta 135515)'),
+        ('RETEIVA', '6. RETENCIÓN DE IVA - RETEIVA DATÁFONO (Cuenta 135517)'),
+        ('RETEICA', '7. RETENCIÓN DE ICA - RETEICA DATÁFONO (Cuenta 135518)'),
+        ('INTERES', '8. INTERESES Y RENDIMIENTOS FINANCIEROS GANADOS (Cuenta 42100501)'),
+        ('AJUSTE_INTERES', '9. AJUSTE DÉBITO DE INTERESES')
+    ]
+    curr_r = 4
+    item_no = 1
+    for cat_code, cat_title in cat_defs_saved:
+        cat_items = [t for t in gb_saved if t.get('subcategoria') == cat_code]
+        if not cat_items:
+            continue
+        ws_gb.merge_cells(start_row=curr_r, start_column=1, end_row=curr_r, end_column=4)
+        ws_gb.cell(curr_r, 1, f"{cat_title} ({len(cat_items)} movimientos)").font = font_bold
+        c_sub = ws_gb.cell(curr_r, 5, sum(x.get('valor', 0.0) for x in cat_items))
+        c_sub.number_format = '$#,##0.00'; c_sub.font = font_bold; c_sub.alignment = align_right
+        for c in range(1, 8):
+            ws_gb.cell(curr_r, c).fill = fill_blue
+            ws_gb.cell(curr_r, c).border = border_thin
+        curr_r += 1
+        for t in cat_items:
+            ws_gb.cell(curr_r, 1, item_no).alignment = align_center
+            ws_gb.cell(curr_r, 2, t.get('fecha', '')).alignment = align_center
+            ws_gb.cell(curr_r, 3, t.get('desc', '')).alignment = align_left
+            ws_gb.cell(curr_r, 4, t.get('via_cruce', '')).alignment = align_center
+            c_v = ws_gb.cell(curr_r, 5, t.get('valor', 0.0))
+            c_v.number_format = '$#,##0.00'; c_v.alignment = align_right
+            ws_gb.cell(curr_r, 6, t.get('cuenta_puc', '')).alignment = align_left
+            ws_gb.cell(curr_r, 7, "SEPARADO OK").alignment = align_center
+            ws_gb.cell(curr_r, 7).fill = fill_green; ws_gb.cell(curr_r, 7).font = font_bold
+            for c in range(1, 8): ws_gb.cell(curr_r, c).border = border_thin
+            curr_r += 1
+            item_no += 1
 
     ws_sal = wb.create_sheet('SALIDAS_CRUZADAS')
     ws_sal.views.sheetView[0].showGridLines = True
