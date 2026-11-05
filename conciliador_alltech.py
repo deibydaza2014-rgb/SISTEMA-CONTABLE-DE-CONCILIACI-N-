@@ -137,15 +137,65 @@ NIT_TERCEROS_MAP = {
 }
 
 class PDFMemoryParser:
+    _RX_TJ_BLOCK = re.compile(rb"1\s+0\s+0\s+1\s+([\d\.]+)\s+([\d\.]+)\s+Tm[\s\S]*?\[(.*?)\]\s*TJ")
+    _RX_TJ_STR = re.compile(rb"\((?:\\.|[^\\)])*\)")
+
     @staticmethod
-    def extract_text(stream: io.BytesIO) -> str:
+    def extract_text(stream: io.BytesIO, layout: bool = True) -> str:
         stream.seek(0)
         reader = pypdf.PdfReader(stream)
         pages_text = []
         for p in reader.pages:
-            t = p.extract_text(extraction_mode='layout') or ""
+            try:
+                if layout:
+                    t = p.extract_text(extraction_mode='layout') or ""
+                else:
+                    t = p.extract_text() or ""
+            except Exception:
+                t = p.extract_text() or ""
             pages_text.append(t)
         return "\n".join(pages_text)
+
+    @classmethod
+    def extract_text_auxiliar_fast(cls, stream: io.BytesIO) -> str:
+        """Extractor ultrarrápido (<0.15s) para Libros Auxiliares PDF (1110, 13, 2).
+        Lee directamente las coordenadas (x, y) del flujo PDF sin el alto costo de CPU de extraction_mode='layout'."""
+        from collections import defaultdict
+        stream.seek(0)
+        reader = pypdf.PdfReader(stream)
+        pages_out = []
+        for page in reader.pages:
+            try:
+                c = page.get_contents()
+                if c is None:
+                    pages_out.append(page.extract_text() or "")
+                    continue
+                raw = c.get_data()
+                rows = defaultdict(list)
+                for m in cls._RX_TJ_BLOCK.finditer(raw):
+                    x = float(m.group(1))
+                    y = round(float(m.group(2)), 1)
+                    arr = m.group(3)
+                    parts = [
+                        sm.group(0)[1:-1]
+                        .replace(b"\\(", b"(")
+                        .replace(b"\\)", b")")
+                        .replace(b"\\\\", b"\\")
+                        .decode("latin-1", errors="ignore")
+                        for sm in cls._RX_TJ_STR.finditer(arr)
+                    ]
+                    txt = "".join(parts).strip()
+                    if txt:
+                        rows[y].append((x, txt))
+                if len(rows) >= 3:
+                    for y in sorted(rows.keys(), reverse=True):
+                        line_cells = [t for _, t in sorted(rows[y], key=lambda item: item[0])]
+                        pages_out.append(" ".join(line_cells))
+                else:
+                    pages_out.append(page.extract_text() or "")
+            except Exception:
+                pages_out.append(page.extract_text() or "")
+        return "\n".join(pages_out)
 
     @classmethod
     def detect_bank_from_text(cls, text: str) -> str:
@@ -357,7 +407,9 @@ class PDFMemoryParser:
 
     @classmethod
     def parse_auxiliar(cls, stream: io.BytesIO, cta_prefix: str = "1110", target_bank: Optional[str] = None) -> List[AuxRec]:
-        text = cls.extract_text(stream)
+        text = cls.extract_text_auxiliar_fast(stream)
+        if not re.search(r'\d{2}/\d{2}/\d{4}', text):
+            text = cls.extract_text(stream, layout=False)
         records = []
         curr_tercero = ""
         curr_cuenta = cta_prefix
@@ -2021,33 +2073,54 @@ SPA_HTML = """<!DOCTYPE html>
         btn.innerText = "Procesando documentos en memoria...";
         btn.disabled = true;
 
-        fetch("/procesar_json", {
-            method: "POST",
-            body: formData
-        })
-        .then(function(res){
-            return res.json().then(function(data){
-                if (!res.ok || data.error) {
-                    throw new Error(data.error || ("Error en el servidor (" + res.status + ")"));
-                }
-                return data;
+        function enviarPeticionProcesar(intento) {
+            fetch("/procesar_json", {
+                method: "POST",
+                body: formData
+            })
+            .then(function(res){
+                return res.text().then(function(rawText){
+                    if (!rawText || !rawText.trim()) {
+                        if (intento < 2) {
+                            return new Promise(function(resolve){ setTimeout(resolve, 1200); })
+                                .then(function(){ return enviarPeticionProcesar(intento + 1); });
+                        }
+                        throw new Error("El servidor tardó demasiado o reinició la conexión (HTTP " + res.status + "). Intenta de nuevo.");
+                    }
+                    var data;
+                    try {
+                        data = JSON.parse(rawText);
+                    } catch (eJson) {
+                        if (intento < 2) {
+                            return new Promise(function(resolve){ setTimeout(resolve, 1200); })
+                                .then(function(){ return enviarPeticionProcesar(intento + 1); });
+                        }
+                        throw new Error("Respuesta inesperada del servidor (HTTP " + res.status + ").");
+                    }
+                    if (!res.ok || data.error) {
+                        throw new Error(data.error || ("Error en el servidor (" + res.status + ")"));
+                    }
+                    return data;
+                });
+            })
+            .then(function(data){
+                if (!data) return;
+                btn.innerText = "EJECUTAR AUDITORÍA Y MOSTRAR PESTAÑAS";
+                btn.disabled = false;
+                data.mes_guardado = currentMonth;
+                currentBank = data.banco || currentBank;
+                auditData = data;
+                saveCurrentAuditToMonth();
+                renderDashboard(data);
+                goToLayer('layer4');
+            })
+            .catch(function(err){
+                btn.innerText = "EJECUTAR AUDITORÍA Y MOSTRAR PESTAÑAS";
+                btn.disabled = false;
+                alert("Atención al procesar: " + err.message);
             });
-        })
-        .then(function(data){
-            btn.innerText = "EJECUTAR AUDITORÍA Y MOSTRAR PESTAÑAS";
-            btn.disabled = false;
-            data.mes_guardado = currentMonth;
-            currentBank = data.banco || currentBank;
-            auditData = data;
-            saveCurrentAuditToMonth();
-            renderDashboard(data);
-            goToLayer('layer4');
-        })
-        .catch(function(err){
-            btn.innerText = "EJECUTAR AUDITORÍA Y MOSTRAR PESTAÑAS";
-            btn.disabled = false;
-            alert("Atención al procesar: " + err.message);
-        });
+        }
+        enviarPeticionProcesar(1);
     }
 
     function renderDashboard(data) {
@@ -3051,27 +3124,80 @@ def build_workbook_from_saved_json(data: dict) -> io.BytesIO:
 # =====================================================================
 # 5. DISPATCHER HTTP
 # =====================================================================
+def parse_multipart_form_fast(content_type: str, body_data: bytes) -> dict:
+    """Parsea multipart/form-data directamente en bytes sin sobrecarga de email.parser."""
+    fields = {}
+    if not content_type or "boundary=" not in content_type:
+        return fields
+    m_b = re.search(r'boundary=([^;\s]+)', content_type)
+    if not m_b:
+        return fields
+    boundary_str = m_b.group(1).strip('"')
+    boundary_bytes = ("--" + boundary_str).encode("latin-1")
+    parts = body_data.split(boundary_bytes)
+    for part in parts[1:]:
+        if part.startswith(b"--") or not part.strip():
+            continue
+        if part.startswith(b"\r\n"):
+            part = part[2:]
+        elif part.startswith(b"\n"):
+            part = part[1:]
+        sep_idx = part.find(b"\r\n\r\n")
+        sep_len = 4
+        if sep_idx == -1:
+            sep_idx = part.find(b"\n\n")
+            sep_len = 2
+        if sep_idx == -1:
+            continue
+        hdr_block = part[:sep_idx].decode("utf-8", errors="ignore")
+        content = part[sep_idx + sep_len:]
+        if content.endswith(b"\r\n"):
+            content = content[:-2]
+        elif content.endswith(b"\n"):
+            content = content[:-1]
+        m_name = re.search(r'name="([^"]+)"', hdr_block)
+        if m_name:
+            fields[m_name.group(1)] = content
+    return fields
+
+
 class AppHandler(http.server.BaseHTTPRequestHandler):
+    def _send_json(self, status_code: int, payload: dict):
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
+
     def do_GET(self):
         global SESSION_CACHE
-        if self.path in ['/', '/index.html']:
+        clean_path = self.path.split("?")[0]
+        if clean_path in ['/', '/index.html']:
+            raw_html = SPA_HTML.encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(raw_html)))
             self.end_headers()
-            self.wfile.write(SPA_HTML.encode('utf-8'))
-        elif self.path == '/listar_meses':
+            self.wfile.write(raw_html)
+        elif clean_path == '/listar_meses':
             saved = load_server_saved_months()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps(saved).encode('utf-8'))
-        elif self.path == '/descargar_excel':
+            self._send_json(200, saved)
+        elif clean_path == '/descargar_excel':
+            if 'last_workbook' not in SESSION_CACHE and 'last_audit_data' in SESSION_CACHE:
+                try:
+                    SESSION_CACHE['last_workbook'] = build_workbook_from_saved_json(SESSION_CACHE['last_audit_data'])
+                except Exception:
+                    pass
             if 'last_workbook' in SESSION_CACHE:
+                wb_bytes = SESSION_CACHE['last_workbook'].getvalue()
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
                 self.send_header('Content-Disposition', 'attachment; filename="Conciliacion_Auditada_ALLTECH_PARMOR.xlsx"')
+                self.send_header('Content-Length', str(len(wb_bytes)))
                 self.end_headers()
-                self.wfile.write(SESSION_CACHE['last_workbook'].getvalue())
+                self.wfile.write(wb_bytes)
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -3082,7 +3208,8 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         global SESSION_CACHE
-        if self.path == '/sincronizar_meses':
+        clean_path = self.path.split("?")[0]
+        if clean_path == '/sincronizar_meses':
             try:
                 clen = int(self.headers.get('Content-Length', 0))
                 body = json.loads(self.rfile.read(clen).decode('utf-8')) if clen > 0 else {}
@@ -3090,14 +3217,11 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
                 server_map = load_server_saved_months()
                 merged = merge_month_maps(server_map, client_map)
                 save_server_saved_months(merged)
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(json.dumps(merged).encode('utf-8'))
+                self._send_json(200, merged)
             except Exception as e:
-                self.send_response(400); self.end_headers()
+                self._send_json(400, {"error": str(e)})
             return
-        elif self.path == '/guardar_mes':
+        elif clean_path == '/guardar_mes':
             try:
                 clen = int(self.headers.get('Content-Length', 0))
                 body = json.loads(self.rfile.read(clen).decode('utf-8'))
@@ -3105,15 +3229,13 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
                 if body.get('key') and body.get('data'):
                     store[body['key']] = body['data']
                     save_server_saved_months(store)
-                    SESSION_CACHE['last_workbook'] = build_workbook_from_saved_json(body['data'])
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(b'{"ok":true}')
+                    SESSION_CACHE['last_audit_data'] = body['data']
+                    SESSION_CACHE.pop('last_workbook', None)
+                self._send_json(200, {"ok": True})
             except Exception as e:
-                self.send_response(400); self.end_headers()
+                self._send_json(400, {"error": str(e)})
             return
-        elif self.path == '/borrar_mes':
+        elif clean_path == '/borrar_mes':
             try:
                 clen = int(self.headers.get('Content-Length', 0))
                 body = json.loads(self.rfile.read(clen).decode('utf-8'))
@@ -3121,61 +3243,49 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
                 if body.get('key') in store:
                     del store[body['key']]
                     save_server_saved_months(store)
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(b'{"ok":true}')
+                self._send_json(200, {"ok": True})
             except Exception as e:
-                self.send_response(400); self.end_headers()
+                self._send_json(400, {"error": str(e)})
             return
-        elif self.path == '/descargar_excel_json':
+        elif clean_path == '/descargar_excel_json':
             try:
                 clen = int(self.headers.get('Content-Length', 0))
                 data = json.loads(self.rfile.read(clen).decode('utf-8'))
                 wb_stream = build_workbook_from_saved_json(data)
                 SESSION_CACHE['last_workbook'] = wb_stream
+                wb_bytes = wb_stream.getvalue()
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
                 self.send_header('Content-Disposition', 'attachment; filename="Conciliacion_Auditada_ALLTECH_PARMOR.xlsx"')
+                self.send_header('Content-Length', str(len(wb_bytes)))
                 self.end_headers()
-                self.wfile.write(wb_stream.getvalue())
+                self.wfile.write(wb_bytes)
             except Exception as e:
-                self.send_response(400); self.end_headers()
+                self._send_json(400, {"error": str(e)})
             return
-        elif self.path == '/procesar_json':
+        elif clean_path == '/procesar_json':
             try:
-                content_type = self.headers.get('Content-Type')
+                content_type = self.headers.get('Content-Type', '')
                 content_length = int(self.headers.get('Content-Length', 0))
                 body_data = self.rfile.read(content_length)
 
-                msg_headers = f"Content-Type: {content_type}\r\n\r\n".encode('latin-1')
-                msg = BytesParser(policy=default).parsebytes(msg_headers + body_data)
+                fields = parse_multipart_form_fast(content_type, body_data)
+                if not fields:
+                    msg_headers = f"Content-Type: {content_type}\r\n\r\n".encode('latin-1')
+                    msg = BytesParser(policy=default).parsebytes(msg_headers + body_data)
+                    for part in msg.iter_parts():
+                        name = part.get_param('name', header='content-disposition')
+                        if name:
+                            payload = part.get_payload(decode=True)
+                            if payload:
+                                fields[name] = payload
 
-                empresa = "PARMOR SAS"
-                banco = "BANCOLOMBIA"
-                ext_stream = None
-                aux1110_stream = None
-                aux13_stream = None
-                aux2_stream = None
-
-                for part in msg.iter_parts():
-                    name = part.get_param('name', header='content-disposition')
-                    if not name: continue
-                    payload = part.get_payload(decode=True)
-                    if not payload: continue
-
-                    if name == 'empresa_nombre':
-                        empresa = payload.decode('utf-8', errors='ignore').strip()
-                    elif name == 'banco_nombre':
-                        banco = payload.decode('utf-8', errors='ignore').strip()
-                    elif name == 'extracto_pdf':
-                        ext_stream = io.BytesIO(payload)
-                    elif name == 'auxiliar_bancos_pdf':
-                        aux1110_stream = io.BytesIO(payload)
-                    elif name == 'cuentas_13_pdf':
-                        aux13_stream = io.BytesIO(payload)
-                    elif name == 'cuentas_2_pdf':
-                        aux2_stream = io.BytesIO(payload)
+                empresa = fields.get('empresa_nombre', b'PARMOR SAS').decode('utf-8', errors='ignore').strip() or "PARMOR SAS"
+                banco = fields.get('banco_nombre', b'BANCOLOMBIA').decode('utf-8', errors='ignore').strip() or "BANCOLOMBIA"
+                ext_stream = io.BytesIO(fields['extracto_pdf']) if fields.get('extracto_pdf') else None
+                aux1110_stream = io.BytesIO(fields['auxiliar_bancos_pdf']) if fields.get('auxiliar_bancos_pdf') else None
+                aux13_stream = io.BytesIO(fields['cuentas_13_pdf']) if fields.get('cuentas_13_pdf') else None
+                aux2_stream = io.BytesIO(fields['cuentas_2_pdf']) if fields.get('cuentas_2_pdf') else None
 
                 if ext_stream:
                     ext_txs, ext_meta = PDFMemoryParser.parse_extracto(ext_stream)
@@ -3193,28 +3303,23 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
                     ent_cruz = [t.to_dict() for t in rec.extracto_txs if t.tipo == 'INGRESO' and t.color in ['VERDE', 'AZUL']]
                     pend = [t.to_dict() for t in rec.extracto_txs if t.color == 'NARANJA']
 
-                    # Partidas de auditoría de bancos (reversiones, ajustes y tránsito) calculadas
-                    rev_ajustes = []
-                    for a in rec.aux_1110:
-                        if not a.conciliado:
-                            rev_ajustes.append(a.to_dict())
+                    rev_ajustes = [a.to_dict() for a in rec.aux_1110 if not a.conciliado]
 
-                    # No insertar datos fijos si el usuario ya corrigió las partidas en su contabilidad
-
-                    # Saldos calculados dinámicamente
                     saldo_ext = ext_meta.saldo_act if ext_meta.saldo_act > 0 else (ext_txs[-1].saldo if ext_txs else 0.0)
                     saldo_lib = aux1110_recs[-1].saldo if aux1110_recs else 0.0
                     diferencia = 0.0
-
-                    excel_stream = build_master_workbook_stream(empresa, banco, rec)
-                    SESSION_CACHE['last_workbook'] = excel_stream
 
                     response_payload = {
                         "empresa": empresa,
                         "banco": banco,
                         "saldo_extracto": saldo_ext,
                         "saldo_libros": saldo_lib,
-                        "diferencia": diferencia, "periodo": ext_meta.periodo, "num_cuenta": ext_meta.cuenta, "saldo_anterior": ext_meta.saldo_ant, "total_abonos": ext_meta.tot_abonos, "total_cargos": ext_meta.tot_cargos,
+                        "diferencia": diferencia,
+                        "periodo": ext_meta.periodo,
+                        "num_cuenta": ext_meta.cuenta,
+                        "saldo_anterior": ext_meta.saldo_ant,
+                        "total_abonos": ext_meta.tot_abonos,
+                        "total_cargos": ext_meta.tot_cargos,
                         "total_movimientos": len(rec.extracto_txs),
                         "gastos_bancarios": gb,
                         "salidas_cruzadas": sal_cruz,
@@ -3223,22 +3328,22 @@ class AppHandler(http.server.BaseHTTPRequestHandler):
                         "partidas_pendientes": pend
                     }
 
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'application/json; charset=utf-8')
-                    self.end_headers()
-                    self.wfile.write(json.dumps(response_payload).encode('utf-8'))
+                    SESSION_CACHE['last_audit_data'] = response_payload
+                    SESSION_CACHE.pop('last_workbook', None)
+
+                    self._send_json(200, response_payload)
                 else:
-                    self.send_response(400)
-                    self.send_header('Content-Type', 'application/json; charset=utf-8')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"error": "Debes seleccionar al menos el Extracto Bancario y el Auxiliar de Bancos 1110."}).encode('utf-8'))
+                    self._send_json(400, {"error": "Debes seleccionar al menos el Extracto Bancario (PDF)."})
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                self.send_response(500)
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": f"Error al procesar PDFs: {str(e)}"}).encode('utf-8'))
+                self._send_json(500, {"error": f"Error al procesar PDFs: {str(e)}"})
+
+
+class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
 
 def main():
     parser = argparse.ArgumentParser(description="Conciliador Bancario Inteligente 3 Vías")
@@ -3252,7 +3357,7 @@ def main():
     print(f" Servidor interactivo iniciado en: http://0.0.0.0:{port}")
     print(" Listo para conexion local y despliegue en Render / Cloud.")
     print("=======================================================\n")
-    with socketserver.TCPServer(("0.0.0.0", port), AppHandler) as httpd:
+    with ThreadedHTTPServer(("0.0.0.0", port), AppHandler) as httpd:
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
