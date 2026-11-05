@@ -558,6 +558,25 @@ class ReconcilerCore:
                     t.diagnostico = "Rendimiento financiero abonado en cuenta de ahorros."
                     t.protocolo = "Causar en cuenta 42100501 (Ingresos Financieros) por separado, sin cruzar con gastos."
 
+            # Si es una categoría de gasto/impuesto/retención pero en el extracto es una REVERSIÓN (REV / DEVOLUCIÓN / INGRESO),
+            # marcarla como reversión para que RESTE al total del gasto bancario y no se sume:
+            if t.color == "AMARILLO" and t.subcategoria not in ["INTERES", "AJUSTE_INTERES"]:
+                es_rev = (
+                    d_u.startswith("REV ")
+                    or " REV " in f" {d_u} "
+                    or "REVERSION" in d_u
+                    or "REVERSIÓN" in d_u
+                    or "DEVOLUCION" in d_u
+                    or "DEVOLUCIÓN" in d_u
+                    or "REINTEGRO" in d_u
+                    or t.tipo == "INGRESO"
+                )
+                if es_rev:
+                    t.tipo = "INGRESO"
+                    t.via_cruce = f"🔄 REV / Devolución ({t.via_cruce})"
+                    t.diagnostico = "Devolución o reversión bancaria a favor de la empresa: disminuye el gasto bancario del mes."
+                    t.protocolo = f"🔄 RESTAR -${abs(t.valor):,.2f} en {t.cuenta_puc} (es devolución del banco, disminuye el gasto)."
+
         # 2. Pre-identificar notas contables bancarias acumuladas en Auxiliar 1110 (Gastos Bancarios e Intereses)
         for a in self.aux_1110:
             if a.conciliado:
@@ -820,8 +839,12 @@ class ReconcilerCore:
                         a.estado = "TRANSITO"
                         a.diagnostico = "Consignación o transferencia registrada en contabilidad no acreditada en banco."
 
-        # 5B. Verificar si las Notas Contables de Gastos Bancarios en Libros cuadran con el Total de Gastos Bancarios del Extracto
-        tot_gastos_ext = round(sum(t.valor for t in self.extracto_txs if t.color == "AMARILLO" and t.tipo == "EGRESO"), 2)
+        # 5B. Verificar si las Notas Contables de Gastos Bancarios en Libros cuadran con el Total Neto de Gastos Bancarios del Extracto (restando REV)
+        tot_gastos_ext = round(sum(
+            (-abs(t.valor) if (t.tipo == "INGRESO" or t.desc.upper().startswith("REV ") or "REVERSION" in t.desc.upper()) else abs(t.valor))
+            for t in self.extracto_txs
+            if t.color == "AMARILLO" and t.subcategoria != "INTERES"
+        ), 2)
         tot_gastos_lib = round(sum((a.credito - a.debito) for a in self.notas_gastos_1110), 2)
         if self.notas_gastos_1110 and abs(tot_gastos_ext - tot_gastos_lib) > 2.0:
             dif_gb = round(tot_gastos_ext - tot_gastos_lib, 2)
@@ -2269,6 +2292,28 @@ SPA_HTML = """<!DOCTYPE html>
         return s1.length === s2.length && s1 === s2 && Math.abs(v1 - v2) > 2;
     }
 
+    function isGastoReversion(g) {
+        if (!g) return false;
+        var du = (g.desc || "").trim().toUpperCase();
+        if (g.subcategoria === "INTERES" || g.subcategoria === "AJUSTE_INTERES") return false;
+        return (
+            du.startsWith("REV ") ||
+            du.includes(" REV ") ||
+            du.includes("REVERSION") ||
+            du.includes("REVERSIÓN") ||
+            du.includes("DEVOLUCION") ||
+            du.includes("DEVOLUCIÓN") ||
+            du.includes("REINTEGRO") ||
+            g.tipo === "INGRESO"
+        );
+    }
+
+    function signedGastoValor(g) {
+        var v = Math.abs(parseFloat(g.valor || 0));
+        if (g.subcategoria === "INTERES") return v;
+        return isGastoReversion(g) ? -v : v;
+    }
+
     function autoRepairAndDiagnoseAuditData(data) {
         if (!data) return;
         data.gastos_bancarios = data.gastos_bancarios || [];
@@ -2474,15 +2519,27 @@ SPA_HTML = """<!DOCTYPE html>
         var sLib = parseFloat(data.saldo_libros || 0);
         var difReal = +(sExt - sLib).toFixed(2);
 
-        // Sumar gastos e intereses del extracto (Pestaña 1)
-        var totGastosExt = 0, totInteresesExt = 0;
+        // Sumar gastos netos (restando reversiones REV) e intereses del extracto (Pestaña 1)
+        var totGastosBrutos = 0, totRevGastos = 0, totGastosExt = 0, totInteresesExt = 0;
+        var revDetallesList = [];
         (data.gastos_bancarios || []).forEach(function(g) {
-            if (g.subcategoria === "INTERES" || g.tipo === "INGRESO") {
-                totInteresesExt += (g.valor || 0);
+            var du = (g.desc || "").toUpperCase();
+            var isInt = (g.subcategoria === "INTERES" || ((du.includes("INTERES") || du.includes("RENDIMIENTO")) && !du.includes("AJUSTE") && !du.endsWith(" DB")));
+            if (isInt) {
+                totInteresesExt += Math.abs(g.valor || 0);
+            } else if (isGastoReversion(g)) {
+                var rv = Math.abs(g.valor || 0);
+                totRevGastos += rv;
+                totGastosExt -= rv;
+                revDetallesList.push(g.fecha + " " + g.desc + " (-" + formatMoney(rv) + ")");
             } else {
-                totGastosExt += (g.valor || 0);
+                var gv = Math.abs(g.valor || 0);
+                totGastosBrutos += gv;
+                totGastosExt += gv;
             }
         });
+        totGastosBrutos = +totGastosBrutos.toFixed(2);
+        totRevGastos = +totRevGastos.toFixed(2);
         totGastosExt = +totGastosExt.toFixed(2);
         totInteresesExt = +totInteresesExt.toFixed(2);
 
@@ -2549,30 +2606,25 @@ SPA_HTML = """<!DOCTYPE html>
                 "<ul style='margin:0; padding-left:18px;'>" + itemsDig + "</ul></div>";
         }
 
-        // 2. Tarjeta de Diferencia en Gastos Bancarios / Notas Contables / Saldo Inicial (el resto del descuadre)
+        // 2. Tarjeta de Diferencia en Gastos Bancarios / Reversiones (REV) / Notas Contables
         if (Math.abs(restoPorExplicar) > 1.0) {
             var signoResto = restoPorExplicar > 0 ? "+" : "";
-            var msgGastos = "";
-            if (typeof data.total_gastos_libros === "number" && data.total_gastos_libros > 0) {
-                var difGb = +(totGastosExt - data.total_gastos_libros).toFixed(2);
-                msgGastos = "En el Extracto (Pestaña 1) los Gastos Bancarios/GMF/Comisiones/IVA suman <b>" + formatMoney(totGastosExt) + "</b> y en Libros las Notas Contables de Gastos Bancarios suman <b>" + formatMoney(data.total_gastos_libros) + "</b> (Diferencia: <b>" + formatMoney(Math.abs(difGb)) + "</b>). ";
-            } else {
-                msgGastos = "En el Extracto (Pestaña 1) el total de Gastos Bancarios (GMF + Comisiones + Cuota Manejo + IVA + Retenciones) suma <b>" + formatMoney(totGastosExt) + "</b> y los Intereses Ganados suman <b>" + formatMoney(totInteresesExt) + "</b>. ";
-            }
+            var efectoDobleRev = +(totRevGastos * 2).toFixed(2);
+            var coincideConDobleRev = (totRevGastos > 0 && Math.abs(Math.abs(restoPorExplicar) - efectoDobleRev) <= 5.0);
 
-            var consejoResto = "";
-            if (restoPorExplicar > 0) {
-                consejoResto = "Como el Extracto está <b>" + formatMoney(Math.abs(restoPorExplicar)) + " por encima</b> de Libros (después del ajuste de digitación), significa que en el Libro 1110 se registró un <b>menor saldo o un mayor egreso por " + formatMoney(Math.abs(restoPorExplicar)) + "</b>. Verifica:<br>" +
-                    "1️⃣ <b>Nota Contable de Gastos Bancarios del mes (ej. NC de Gastos Bancarios):</b> Compara su Crédito en el libro 1110 contra el total de Pestaña 1 (<b>" + formatMoney(totGastosExt) + "</b>). Si en la NC causaron <b>" + formatMoney(Math.abs(restoPorExplicar)) + " de más</b>, ajusta la NC por <b>-" + formatMoney(Math.abs(restoPorExplicar)) + "</b>.<br>" +
-                    "2️⃣ <b>Saldo Inicial del Mes:</b> Verifica que el Saldo Inicial del Libro 1110 al 01 del mes sea idéntico al Saldo Anterior del Extracto" + (data.saldo_anterior ? " (<b>" + formatMoney(data.saldo_anterior) + "</b>)" : "") + ".";
+            if (coincideConDobleRev) {
+                html += "<div style='background:#FFFFFF; border-left:4px solid #D97706; padding:10px 14px; border-radius:6px; box-shadow:0 1px 3px rgba(0,0,0,0.05); font-size:12.5px; color:#1E293B;'>" +
+                    "<div style='font-weight:700; color:#B45309; margin-bottom:5px;'>🎯 2. ¡Origen Exacto Encontrado! Reversiones Bancarias (REV) en Gastos (" + signoResto + formatMoney(restoPorExplicar) + ")</div>" +
+                    "<p style='margin:0 0 6px 0;'>En el extracto hay <b>Reversiones / Devoluciones Bancarias (REV)</b> a favor de la empresa por <b>-" + formatMoney(totRevGastos) + "</b>. Cuando esas reversiones se suman como gasto en vez de restarse, el gasto bancario en libros se infla exactamente el doble: <b>" + formatMoney(totRevGastos) + " × 2 = " + formatMoney(efectoDobleRev) + "</b>.</p>" +
+                    "<div style='color:#334155;'>👉 <b>Consejo:</b> En la <b>Pestaña 1 (Gastos Bancarios)</b> ya hemos <b>restado automáticamente todas las REV</b> para darte los subtotales netos reales (<b>Neto Gastos: " + formatMoney(totGastosExt) + "</b> = Cargos " + formatMoney(totGastosBrutos) + " − Reversiones REV " + formatMoney(totRevGastos) + "). Actualiza tu Nota Contable de Gastos Bancarios en el software con los nuevos subtotales netos de la Pestaña 1 (disminuyendo el gasto bancario en <b>" + formatMoney(efectoDobleRev) + "</b>) y el descuadre quedará en <b>$0.00</b>.</div></div>";
             } else {
-                consejoResto = "Como el Extracto está <b>" + formatMoney(Math.abs(restoPorExplicar)) + " por debajo</b> de Libros, significa que en el Libro 1110 faltan por causar gastos bancarios o egresos por <b>" + formatMoney(Math.abs(restoPorExplicar)) + "</b>. Compara la Nota Contable de Gastos Bancarios en el libro 1110 contra el total de Pestaña 1 (<b>" + formatMoney(totGastosExt) + "</b>).";
+                var msgGastos = "En el Extracto (Pestaña 1) los Gastos Bancarios Netos suman <b>" + formatMoney(totGastosExt) + "</b>" + (totRevGastos > 0 ? " (Cargos: " + formatMoney(totGastosBrutos) + " − Reversiones REV: -" + formatMoney(totRevGastos) + ")" : "") + " y los Intereses Ganados suman <b>" + formatMoney(totInteresesExt) + "</b>. ";
+                var consejoResto = "Verifica la <b>Nota Contable de Gastos Bancarios del mes</b> en el Libro 1110 contra los subtotales netos de la Pestaña 1 (<b>" + formatMoney(totGastosExt) + "</b>) y que el Saldo Inicial del Libro 1110 coincida con el Saldo Anterior del Extracto" + (data.saldo_anterior ? " (<b>" + formatMoney(data.saldo_anterior) + "</b>)" : "") + ".";
+                html += "<div style='background:#FFFFFF; border-left:4px solid #D97706; padding:10px 14px; border-radius:6px; box-shadow:0 1px 3px rgba(0,0,0,0.05); font-size:12.5px; color:#1E293B;'>" +
+                    "<div style='font-weight:700; color:#B45309; margin-bottom:5px;'>📊 2. Diferencia en Notas de Gastos Bancarios o Saldo Inicial (" + signoResto + formatMoney(restoPorExplicar) + ")</div>" +
+                    "<p style='margin:0 0 6px 0;'>" + msgGastos + "</p>" +
+                    "<div style='color:#334155;'>" + consejoResto + "</div></div>";
             }
-
-            html += "<div style='background:#FFFFFF; border-left:4px solid #D97706; padding:10px 14px; border-radius:6px; box-shadow:0 1px 3px rgba(0,0,0,0.05); font-size:12.5px; color:#1E293B;'>" +
-                "<div style='font-weight:700; color:#B45309; margin-bottom:5px;'>📊 2. Diferencia en Notas de Gastos Bancarios o Saldo Inicial (" + signoResto + formatMoney(restoPorExplicar) + ")</div>" +
-                "<p style='margin:0 0 6px 0;'>" + msgGastos + "</p>" +
-                "<div style='color:#334155;'>" + consejoResto + "</div></div>";
         }
 
         // 3. Tarjeta de Partidas Pendientes o en Tránsito (si aún quedan)
@@ -2672,22 +2724,36 @@ SPA_HTML = """<!DOCTYPE html>
                     g.protocolo = "Causar en cuenta 42100501 (Ingresos Financieros) por separado, sin cruzar con gastos.";
                 }
             }
+            if (isGastoReversion(g)) {
+                g.es_reversion = true;
+                g.tipo = "INGRESO";
+                if (!g.via_cruce.includes("REV")) {
+                    g.via_cruce = "🔄 REV / Devolución (" + g.via_cruce + ")";
+                }
+                g.protocolo = "🔄 Reversión bancaria a favor: RESTAR -" + formatMoney(Math.abs(g.valor)) + " en " + g.cuenta_puc + " (disminuye el gasto).";
+            } else {
+                g.es_reversion = false;
+            }
         });
 
-        // Render Pestaña 1 (Cada categoría 100% separada, sin mezclar ni restar intereses con gastos)
+        // Re-ejecutar renderAdvisorPanel después de normalizar subcategorías y reversiones REV
+        renderAdvisorPanel(data);
+
+        // Render Pestaña 1 (Cada categoría 100% separada; las reversiones REV restan dentro de su propia categoría de gasto)
         var gmfSum = 0, comSum = 0, cuotaSum = 0, portalSum = 0, ivaSum = 0, rfSum = 0, rivaSum = 0, ricaSum = 0, intSum = 0, ajIntSum = 0;
         var gmfCnt = 0, comCnt = 0, cuotaCnt = 0, portalCnt = 0, ivaCnt = 0, rfCnt = 0, rivaCnt = 0, ricaCnt = 0, intCnt = 0, ajIntCnt = 0;
         data.gastos_bancarios.forEach(function(g){
-            if (g.subcategoria === 'GMF') { gmfSum += g.valor; gmfCnt++; }
-            else if (g.subcategoria === 'COMISION') { comSum += g.valor; comCnt++; }
-            else if (g.subcategoria === 'CUOTA_MANEJO') { cuotaSum += g.valor; cuotaCnt++; }
-            else if (g.subcategoria === 'PORTAL') { portalSum += g.valor; portalCnt++; }
-            else if (g.subcategoria === 'IVA') { ivaSum += g.valor; ivaCnt++; }
-            else if (g.subcategoria === 'RETEFUENTE') { rfSum += g.valor; rfCnt++; }
-            else if (g.subcategoria === 'RETEIVA') { rivaSum += g.valor; rivaCnt++; }
-            else if (g.subcategoria === 'RETEICA') { ricaSum += g.valor; ricaCnt++; }
-            else if (g.subcategoria === 'INTERES') { intSum += g.valor; intCnt++; }
-            else if (g.subcategoria === 'AJUSTE_INTERES') { ajIntSum += g.valor; ajIntCnt++; }
+            var sVal = signedGastoValor(g);
+            if (g.subcategoria === 'GMF') { gmfSum += sVal; gmfCnt++; }
+            else if (g.subcategoria === 'COMISION') { comSum += sVal; comCnt++; }
+            else if (g.subcategoria === 'CUOTA_MANEJO') { cuotaSum += sVal; cuotaCnt++; }
+            else if (g.subcategoria === 'PORTAL') { portalSum += sVal; portalCnt++; }
+            else if (g.subcategoria === 'IVA') { ivaSum += sVal; ivaCnt++; }
+            else if (g.subcategoria === 'RETEFUENTE') { rfSum += sVal; rfCnt++; }
+            else if (g.subcategoria === 'RETEIVA') { rivaSum += sVal; rivaCnt++; }
+            else if (g.subcategoria === 'RETEICA') { ricaSum += sVal; ricaCnt++; }
+            else if (g.subcategoria === 'INTERES') { intSum += Math.abs(g.valor); intCnt++; }
+            else if (g.subcategoria === 'AJUSTE_INTERES') { ajIntSum += Math.abs(g.valor); ajIntCnt++; }
         });
         document.getElementById("subKpiGmf").innerText = formatMoney(gmfSum) + " (" + gmfCnt + ")";
         document.getElementById("subKpiCom").innerText = formatMoney(comSum) + " (" + comCnt + ")";
@@ -2799,24 +2865,40 @@ SPA_HTML = """<!DOCTYPE html>
             });
             if (items.length === 0) return;
 
-            var catSum = 0;
-            items.forEach(function(it){ catSum += it.valor; });
+            var catSum = 0, cargosSum = 0, revSum = 0;
+            items.forEach(function(it){
+                var sv = signedGastoValor(it);
+                catSum += sv;
+                if (sv < 0) revSum += Math.abs(sv);
+                else cargosSum += sv;
+            });
+
+            var desgloseRevTxt = revSum > 0
+                ? "Cargos: " + formatMoney(cargosSum) + " − Reversiones (REV): <b style='color:#1E8449;'>-" + formatMoney(revSum) + "</b>"
+                : "bloque separado individualmente";
 
             var trHdr = document.createElement("tr");
             trHdr.style.background = "#EDF3FA";
             trHdr.innerHTML = "<td colspan='3' style='font-weight:700; color:#1B365D; padding:10px 12px;'>📂 " + catObj.title + " (" + items.length + " movs)</td>" +
-                              "<td style='text-align:right; font-weight:700; color:#1B365D; padding:10px 12px;'>Subtotal: " + formatMoney(catSum) + "</td>" +
-                              "<td colspan='3' style='font-size:11.5px; color:#475569;'>bloque separado individualmente</td>";
+                              "<td style='text-align:right; font-weight:700; color:#1B365D; padding:10px 12px;'>Subtotal Neto: " + formatMoney(catSum) + "</td>" +
+                              "<td colspan='3' style='font-size:11.5px; color:#475569;'>" + desgloseRevTxt + "</td>";
             tb.appendChild(trHdr);
 
             items.forEach(function(g){
+                var esRev = isGastoReversion(g);
+                var valFmt = esRev ? ("-" + formatMoney(Math.abs(g.valor))) : formatMoney(Math.abs(g.valor));
+                var valStyle = esRev ? "text-align: right; font-weight: 700; color: #1E8449;" : "text-align: right; font-weight: 600;";
+                var validBadge = esRev
+                    ? "<span class='badge-pill badge-green' style='background:#D4EFDF; color:#145A32;'>🔄 RESTA AL GASTO</span>"
+                    : "<span class='badge-pill badge-green'>SEPARADO OK</span>";
                 var tr = document.createElement("tr");
+                if (esRev) tr.style.background = "#F4ECF7";
                 tr.innerHTML = "<td>" + g.fecha + "</td>" +
-                               "<td>" + g.desc + "</td>" +
-                               "<td><span class='badge-pill " + catObj.badge + "'>" + g.via_cruce + "</span></td>" +
-                               "<td style='text-align: right; font-weight: 600;'>" + formatMoney(g.valor) + "</td>" +
+                               "<td><b>" + g.desc + "</b></td>" +
+                               "<td><span class='badge-pill " + (esRev ? "badge-green" : catObj.badge) + "'>" + g.via_cruce + "</span></td>" +
+                               "<td style='" + valStyle + "'>" + valFmt + "</td>" +
                                "<td><b>" + g.cuenta_puc + "</b></td>" +
-                               "<td><span class='badge-pill badge-green'>SEPARADO OK</span></td>" +
+                               "<td>" + validBadge + "</td>" +
                                "<td>" + g.protocolo + "</td>";
                 tb.appendChild(tr);
             });
@@ -3210,23 +3292,33 @@ def build_master_workbook_stream(empresa: str, banco: str, rec: ReconcilerCore) 
         cat_items = [t for t in gb_list if t.subcategoria == cat_code]
         if not cat_items:
             continue
+        def _signed_tx_val(tx_obj):
+            v_abs = abs(float(tx_obj.valor or 0.0))
+            if tx_obj.subcategoria in ('INTERES', 'AJUSTE_INTERES'):
+                return v_abs
+            du_tx = (tx_obj.desc or '').strip().upper()
+            if du_tx.startswith('REV ') or ' REV ' in f' {du_tx} ' or 'REVERSION' in du_tx or 'DEVOLUCION' in du_tx or tx_obj.tipo == 'INGRESO':
+                return -v_abs
+            return v_abs
+
         ws_gb.merge_cells(start_row=curr_r, start_column=1, end_row=curr_r, end_column=4)
-        ws_gb.cell(curr_r, 1, f"{cat_title} ({len(cat_items)} movimientos)").font = font_bold
-        c_sub = ws_gb.cell(curr_r, 5, sum(x.valor for x in cat_items))
+        ws_gb.cell(curr_r, 1, f"{cat_title} ({len(cat_items)} movimientos — Subtotal Neto)").font = font_bold
+        c_sub = ws_gb.cell(curr_r, 5, sum(_signed_tx_val(x) for x in cat_items))
         c_sub.number_format = '$#,##0.00'; c_sub.font = font_bold; c_sub.alignment = align_right
         for c in range(1, 8):
             ws_gb.cell(curr_r, c).fill = fill_blue
             ws_gb.cell(curr_r, c).border = border_thin
         curr_r += 1
         for t in cat_items:
+            sv_tx = _signed_tx_val(t)
             ws_gb.cell(curr_r, 1, item_no).alignment = align_center
             ws_gb.cell(curr_r, 2, t.fecha).alignment = align_center
             ws_gb.cell(curr_r, 3, t.desc).alignment = align_left
             ws_gb.cell(curr_r, 4, t.via_cruce).alignment = align_center
-            c_v = ws_gb.cell(curr_r, 5, t.valor)
+            c_v = ws_gb.cell(curr_r, 5, sv_tx)
             c_v.number_format = '$#,##0.00'; c_v.alignment = align_right
             ws_gb.cell(curr_r, 6, t.cuenta_puc).alignment = align_left
-            ws_gb.cell(curr_r, 7, "SEPARADO OK").alignment = align_center
+            ws_gb.cell(curr_r, 7, "REVERSIÓN (RESTA)" if sv_tx < 0 else "SEPARADO OK").alignment = align_center
             ws_gb.cell(curr_r, 7).fill = fill_green; ws_gb.cell(curr_r, 7).font = font_bold
             for c in range(1, 8): ws_gb.cell(curr_r, c).border = border_thin
             curr_r += 1
@@ -3468,23 +3560,33 @@ def build_workbook_from_saved_json(data: dict) -> io.BytesIO:
         cat_items = [t for t in gb_saved if t.get('subcategoria') == cat_code]
         if not cat_items:
             continue
+        def _signed_gb_val(x_item):
+            v_abs = abs(float(x_item.get('valor', 0.0) or 0.0))
+            if x_item.get('subcategoria') in ('INTERES', 'AJUSTE_INTERES'):
+                return v_abs
+            du_x = str(x_item.get('desc', '')).strip().upper()
+            if x_item.get('es_reversion') or du_x.startswith('REV ') or ' REV ' in f' {du_x} ' or 'REVERSION' in du_x or 'DEVOLUCION' in du_x or x_item.get('tipo') == 'INGRESO':
+                return -v_abs
+            return v_abs
+
         ws_gb.merge_cells(start_row=curr_r, start_column=1, end_row=curr_r, end_column=4)
-        ws_gb.cell(curr_r, 1, f"{cat_title} ({len(cat_items)} movimientos)").font = font_bold
-        c_sub = ws_gb.cell(curr_r, 5, sum(x.get('valor', 0.0) for x in cat_items))
+        ws_gb.cell(curr_r, 1, f"{cat_title} ({len(cat_items)} movimientos — Subtotal Neto)").font = font_bold
+        c_sub = ws_gb.cell(curr_r, 5, sum(_signed_gb_val(x) for x in cat_items))
         c_sub.number_format = '$#,##0.00'; c_sub.font = font_bold; c_sub.alignment = align_right
         for c in range(1, 8):
             ws_gb.cell(curr_r, c).fill = fill_blue
             ws_gb.cell(curr_r, c).border = border_thin
         curr_r += 1
         for t in cat_items:
+            sv_t = _signed_gb_val(t)
             ws_gb.cell(curr_r, 1, item_no).alignment = align_center
             ws_gb.cell(curr_r, 2, t.get('fecha', '')).alignment = align_center
             ws_gb.cell(curr_r, 3, t.get('desc', '')).alignment = align_left
             ws_gb.cell(curr_r, 4, t.get('via_cruce', '')).alignment = align_center
-            c_v = ws_gb.cell(curr_r, 5, t.get('valor', 0.0))
+            c_v = ws_gb.cell(curr_r, 5, sv_t)
             c_v.number_format = '$#,##0.00'; c_v.alignment = align_right
             ws_gb.cell(curr_r, 6, t.get('cuenta_puc', '')).alignment = align_left
-            ws_gb.cell(curr_r, 7, "SEPARADO OK").alignment = align_center
+            ws_gb.cell(curr_r, 7, "REVERSIÓN (RESTA)" if sv_t < 0 else "SEPARADO OK").alignment = align_center
             ws_gb.cell(curr_r, 7).fill = fill_green; ws_gb.cell(curr_r, 7).font = font_bold
             for c in range(1, 8): ws_gb.cell(curr_r, c).border = border_thin
             curr_r += 1
