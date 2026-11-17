@@ -1412,6 +1412,14 @@ SPA_HTML = """<!DOCTYPE html>
         .saved-month-card { background: #F8FAFC; border: 1px solid #CBD5E1; border-left: 5px solid var(--primary); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 2px 5px rgba(0,0,0,0.04); }
         .saved-month-card h5 { margin: 0 0 6px 0; color: var(--primary); font-size: 14px; }
         .saved-month-card p { margin: 2px 0; font-size: 12px; color: #475569; }
+        .row-manual-blue {
+            background-color: #D6EAF8 !important;
+            transition: background-color 0.25s ease;
+        }
+        .row-manual-blue td {
+            background-color: #D6EAF8 !important;
+            border-bottom: 1px solid #85C1E9 !important;
+        }
     </style>
 </head>
 <body>
@@ -2088,7 +2096,7 @@ SPA_HTML = """<!DOCTYPE html>
             var d = entry.data;
             var kIdx = entry.idx;
             var totPend = (d.partidas_pendientes || []).length;
-            var revPend = (d.partidas_pendientes || []).filter(function(p){ return p.estado_revision === 'CRUZADA_OPCION' || p.estado_revision === 'ANTICIPO_5PASOS'; }).length;
+            var revPend = (d.partidas_pendientes || []).filter(function(p){ return p.estado_revision === 'CRUZADA_OPCION' || p.estado_revision === 'ANTICIPO_5PASOS' || p.estado_revision === 'MANUAL_REF'; }).length;
             var card = document.createElement("div");
             card.className = "saved-month-card";
             card.innerHTML = "<div>" +
@@ -2957,12 +2965,42 @@ SPA_HTML = """<!DOCTYPE html>
         renderPendientesTable();
     }
 
+    var activeManualEditIdx = -1;
+
+    function escapeHtmlAttr(s) {
+        return String(s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    function findHistoricalManualRef(p) {
+        if (!p || !p.desc) return null;
+        var targetDesc = p.desc.trim().toUpperCase();
+        var map = getSavedMonthsMap();
+        var keys = Object.keys(map);
+        for (var i = keys.length - 1; i >= 0; i--) {
+            var mData = map[keys[i]];
+            if (!mData || !mData.partidas_pendientes) continue;
+            for (var j = 0; j < mData.partidas_pendientes.length; j++) {
+                var item = mData.partidas_pendientes[j];
+                if (item !== p && item.estado_revision === 'MANUAL_REF' && item.ref_manual) {
+                    var itDesc = (item.desc || "").trim().toUpperCase();
+                    if (itDesc === targetDesc && item.tipo === p.tipo) {
+                        return {
+                            mes: mData.mes_guardado || keys[i],
+                            ref: item.ref_manual
+                        };
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
     function updatePendReviewCounters() {
         if (!auditData) return;
         var pends = auditData.partidas_pendientes || [];
         var revCnt = 0;
         pends.forEach(function(p){
-            if (p.estado_revision === 'CRUZADA_OPCION' || p.estado_revision === 'ANTICIPO_5PASOS') {
+            if (p.estado_revision === 'CRUZADA_OPCION' || p.estado_revision === 'ANTICIPO_5PASOS' || p.estado_revision === 'MANUAL_REF') {
                 revCnt++;
             }
         });
@@ -2975,6 +3013,64 @@ SPA_HTML = """<!DOCTYPE html>
         if (elFal) elFal.innerText = faltanCnt + " pendientes";
         if (cFal) cFal.innerText = faltanCnt;
         if (cRev) cRev.innerText = revCnt;
+    }
+
+    function toggleManualRefEditor(pIdx) {
+        if (activeManualEditIdx === pIdx) {
+            activeManualEditIdx = -1;
+        } else {
+            activeManualEditIdx = pIdx;
+        }
+        renderPendientesTable();
+    }
+
+    function saveManualRefPend(pIdx) {
+        if (!auditData || !auditData.partidas_pendientes[pIdx]) return;
+        var p = auditData.partidas_pendientes[pIdx];
+        var elTer = document.getElementById("manTer_" + pIdx);
+        var elCta = document.getElementById("manCta_" + pIdx);
+        var elNota = document.getElementById("manNota_" + pIdx);
+
+        var valTer = elTer ? elTer.value.trim() : "";
+        var valCta = elCta ? elCta.value.trim() : "";
+        var valNota = elNota ? elNota.value.trim() : "";
+
+        if (!valTer && !valCta && !valNota) {
+            alert("Escribe al menos cómo vas a llevar esta partida (Tercero/Concepto, Cuenta/Comprobante o Nota de referencia).");
+            return;
+        }
+
+        p.ref_manual = {
+            tercero: valTer || "Definido manualmente",
+            cuenta_doc: valCta || (p.tipo === 'INGRESO' ? "RC / Cuenta por definir" : "CE / Cuenta por definir"),
+            nota: valNota || "Registrado como referencia manual",
+            fecha_guardado: new Date().toLocaleString('es-CO')
+        };
+        p.confirmada = true;
+        p.estado_revision = 'MANUAL_REF';
+        activeManualEditIdx = -1;
+        syncPendRowState(p);
+        saveCurrentAuditToMonth();
+        renderPendientesTable();
+    }
+
+    function applyHistoricalManualRef(pIdx) {
+        if (!auditData || !auditData.partidas_pendientes[pIdx]) return;
+        var p = auditData.partidas_pendientes[pIdx];
+        var hist = findHistoricalManualRef(p);
+        if (!hist || !hist.ref) return;
+        p.ref_manual = {
+            tercero: hist.ref.tercero,
+            cuenta_doc: hist.ref.cuenta_doc,
+            nota: hist.ref.nota + " (Aplicado desde referencia previa)",
+            fecha_guardado: new Date().toLocaleString('es-CO')
+        };
+        p.confirmada = true;
+        p.estado_revision = 'MANUAL_REF';
+        activeManualEditIdx = -1;
+        syncPendRowState(p);
+        saveCurrentAuditToMonth();
+        renderPendientesTable();
     }
 
     function nextOptionPend(pIdx) {
@@ -3006,6 +3102,7 @@ SPA_HTML = """<!DOCTYPE html>
         p.active_opt_idx = -1;
         p.confirmada = true;
         p.estado_revision = 'ANTICIPO_5PASOS';
+        activeManualEditIdx = -1;
         syncPendRowState(p);
         saveCurrentAuditToMonth();
         renderPendientesTable();
@@ -3019,6 +3116,7 @@ SPA_HTML = """<!DOCTYPE html>
         }
         p.confirmada = true;
         p.estado_revision = 'CRUZADA_OPCION';
+        activeManualEditIdx = -1;
         syncPendRowState(p);
         saveCurrentAuditToMonth();
         renderPendientesTable();
@@ -3036,7 +3134,10 @@ SPA_HTML = """<!DOCTYPE html>
 
     function syncPendRowState(p) {
         var opts = p.opciones_similares || [];
-        if (p.estado_revision === 'CRUZADA_OPCION' && p.active_opt_idx >= 0 && p.active_opt_idx < opts.length) {
+        if (p.estado_revision === 'MANUAL_REF' && p.ref_manual) {
+            p.tercero = "✍️ " + p.ref_manual.tercero + " (" + p.ref_manual.cuenta_doc + ")";
+            p.protocolo = "✍️ CÓMO SE VA A LLEVAR (REFERENCIA GUARDADA): Contabilizar en [" + p.ref_manual.cuenta_doc + "] a nombre de [" + p.ref_manual.tercero + "]. Nota: " + p.ref_manual.nota;
+        } else if (p.estado_revision === 'CRUZADA_OPCION' && p.active_opt_idx >= 0 && p.active_opt_idx < opts.length) {
             var op = opts[p.active_opt_idx];
             p.tercero = "✅ YA CRUZADA: " + op.tercero + " (" + op.doc + ")";
             p.protocolo = "✅ PARTIDA VALIDADA Y CRUZADA: Causar " + (p.tipo === 'INGRESO' ? "Recibo de Caja (RC)" : "Comprobante de Egreso (CE)") + " con " + op.doc + " de " + op.tercero + " por " + formatMoney(op.valor) + ". " + op.detalle_dif;
@@ -3084,6 +3185,8 @@ SPA_HTML = """<!DOCTYPE html>
                 statusPill = "<span style='background:#1E8449; color:white; padding:3px 9px; border-radius:12px; font-size:10.5px; font-weight:700; margin-left:6px;'>✅ YA CRUZADA / VALIDADA</span>";
             } else if (p.estado_revision === 'ANTICIPO_5PASOS') {
                 statusPill = "<span style='background:#D68910; color:white; padding:3px 9px; border-radius:12px; font-size:10.5px; font-weight:700; margin-left:6px;'>📌 EN ANTICIPO / 5 PASOS</span>";
+            } else if (p.estado_revision === 'MANUAL_REF') {
+                statusPill = "<span style='background:#1F618D; color:white; padding:3px 9px; border-radius:12px; font-size:10.5px; font-weight:700; margin-left:6px;'>✍️ DEFINIDO MANUALMENTE (REFERENCIA)</span>";
             } else {
                 statusPill = "<span style='background:#E2E8F0; color:#475569; padding:2px 8px; border-radius:12px; font-size:10px; font-weight:700; margin-left:6px;'>⏳ PENDIENTE POR MARCAR</span>";
             }
@@ -3094,6 +3197,15 @@ SPA_HTML = """<!DOCTYPE html>
 
             var simHtml = "<div style='margin-bottom:5px; display:flex; align-items:center; flex-wrap:wrap;'>" + tipoDescTag + statusPill + "</div>";
 
+            // Si existe una referencia histórica guardada en otro movimiento igual y esta fila aún no tiene referencia manual, mostrar aviso inteligente
+            var histRef = (p.estado_revision !== 'MANUAL_REF') ? findHistoricalManualRef(p) : null;
+            if (histRef && histRef.ref) {
+                simHtml += "<div style='background:#EBF5FB; border:1px dashed #2980B9; padding:6px 10px; border-radius:6px; margin-bottom:6px; font-size:11px; color:#1B4F72; display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;'>" +
+                    "<span>💡 <b>Referencia guardada antes (" + histRef.mes + "):</b> Lo llevaste a <b>" + escapeHtmlAttr(histRef.ref.cuenta_doc) + "</b> — <b>" + escapeHtmlAttr(histRef.ref.tercero) + "</b> (<i>" + escapeHtmlAttr(histRef.ref.nota) + "</i>)</span>" +
+                    "<button type='button' onclick='applyHistoricalManualRef(" + pIdx + ")' style='background:#2980B9; color:white; border:none; padding:4px 9px; border-radius:4px; font-size:10.5px; font-weight:700; cursor:pointer;'>⚡ Usar esta misma referencia</button>" +
+                    "</div>";
+            }
+
             var boxBg = "#F8FAFC";
             var boxBorder = "#DCE4EC";
             if (p.estado_revision === 'CRUZADA_OPCION') {
@@ -3102,9 +3214,21 @@ SPA_HTML = """<!DOCTYPE html>
             } else if (p.estado_revision === 'ANTICIPO_5PASOS') {
                 boxBg = "#F9E79F";
                 boxBorder = "#D68910";
+            } else if (p.estado_revision === 'MANUAL_REF') {
+                boxBg = "#D6EAF8";
+                boxBorder = "#1F618D";
             }
 
-            if (p.active_opt_idx >= 0 && p.active_opt_idx < opts.length) {
+            if (p.estado_revision === 'MANUAL_REF' && p.ref_manual) {
+                simHtml += "<div style='background:" + boxBg + "; border:2px solid " + boxBorder + "; border-left:6px solid #1F618D; padding:9px 11px; border-radius:6px; margin-bottom:6px; font-size:11.5px; box-shadow:0 1px 3px rgba(0,0,0,0.05);'>" +
+                           "<div style='display:flex; justify-content:space-between; align-items:center; font-weight:700; color:#154360;'>" +
+                           "<span>✍️ Referencia Manual Guardada: " + escapeHtmlAttr(p.ref_manual.tercero) + "</span>" +
+                           "<span style='background:#1F618D; color:white; padding:2px 8px; border-radius:4px; font-size:11px;'>" + escapeHtmlAttr(p.ref_manual.cuenta_doc) + "</span>" +
+                           "</div>" +
+                           "<div style='color:#1B4F72; font-weight:600; font-size:11.5px; margin-top:4px;'>📝 Cómo se lleva / Nota: " + escapeHtmlAttr(p.ref_manual.nota) + "</div>" +
+                           (p.ref_manual.fecha_guardado ? "<div style='color:#546E7A; font-size:10px; margin-top:3px;'>Guardado el: " + escapeHtmlAttr(p.ref_manual.fecha_guardado) + "</div>" : "") +
+                           "</div>";
+            } else if (p.active_opt_idx >= 0 && p.active_opt_idx < opts.length) {
                 var op = opts[p.active_opt_idx];
                 var tagColor = op.dif <= 1.0 ? '#1E8449' : (op.dif <= 1000.0 ? '#16A085' : '#1F618D');
                 var warnBanner = (!p.tiene_tercero && op.dif > 1000.0)
@@ -3139,6 +3263,8 @@ SPA_HTML = """<!DOCTYPE html>
                 simHtml += "<button type='button' onclick='confirmOptionPend(" + pIdx + ")' style='background:#1E8449; color:white; border:none; padding:6px 10px; border-radius:4px; font-size:11px; font-weight:700; cursor:pointer;'>✅ Validar / Cruzar (Pintar Verde)</button>";
             }
             simHtml += "<button type='button' onclick='setAnticipoPend(" + pIdx + ")' style='background:#D68910; color:white; border:none; padding:6px 10px; border-radius:4px; font-size:11px; font-weight:700; cursor:pointer;'>📌 Mandar a Anticipo / 5 Pasos (Pintar Amarillo)</button>";
+            var btnManLabel = (p.estado_revision === 'MANUAL_REF') ? "✏️ Editar cómo se lleva" : "✍️ Escribir cómo se va a llevar";
+            simHtml += "<button type='button' onclick='toggleManualRefEditor(" + pIdx + ")' style='background:#1F618D; color:white; border:none; padding:6px 10px; border-radius:4px; font-size:11px; font-weight:700; cursor:pointer;'>" + btnManLabel + "</button>";
             if (opts.length > 0) {
                 var btnNextLbl = (p.active_opt_idx === -1)
                     ? ("🔍 Ver opciones cercanas (" + opts.length + ")")
@@ -3150,18 +3276,45 @@ SPA_HTML = """<!DOCTYPE html>
             }
             simHtml += "</div>";
 
+            // Cuadro desplegable para escribir manualmente cómo se va a llevar y guardarlo como referencia
+            if (activeManualEditIdx === pIdx) {
+                var curTer = (p.ref_manual && p.ref_manual.tercero) ? escapeHtmlAttr(p.ref_manual.tercero) : "";
+                var curCta = (p.ref_manual && p.ref_manual.cuenta_doc) ? escapeHtmlAttr(p.ref_manual.cuenta_doc) : "";
+                var curNota = (p.ref_manual && p.ref_manual.nota) ? escapeHtmlAttr(p.ref_manual.nota) : "";
+                simHtml += "<div style='margin-top:8px; background:#FFFFFF; border:2px solid #1F618D; border-radius:8px; padding:10px 12px; box-shadow:0 3px 8px rgba(0,0,0,0.08);'>" +
+                    "<div style='font-weight:700; color:#154360; font-size:12px; margin-bottom:8px;'>✍️ Anotar cómo se va a llevar esta partida (Se guarda como referencia en la nube y en Excel):</div>" +
+                    "<div style='display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:8px;'>" +
+                    "<div><label style='font-size:10.5px; font-weight:700; color:#334155; display:block; margin-bottom:3px;'>1. Tercero o Concepto Real:</label>" +
+                    "<input type='text' id='manTer_" + pIdx + "' value="" + curTer + "" placeholder='Ej: César Parra / DIAN / Cliente X...' style='width:100%; padding:6px 8px; border:1px solid #CBD5E1; border-radius:4px; font-size:11.5px; box-sizing:border-box;'></div>" +
+                    "<div><label style='font-size:10.5px; font-weight:700; color:#334155; display:block; margin-bottom:3px;'>2. Cuenta PUC o Comprobante:</label>" +
+                    "<input type='text' id='manCta_" + pIdx + "' value="" + curCta + "" placeholder='Ej: Cta 236505 / CE 2815 / RC 3260...' style='width:100%; padding:6px 8px; border:1px solid #CBD5E1; border-radius:4px; font-size:11.5px; box-sizing:border-box;'></div>" +
+                    "</div>" +
+                    "<div style='margin-bottom:8px;'><label style='font-size:10.5px; font-weight:700; color:#334155; display:block; margin-bottom:3px;'>3. Nota / Cómo se va a llevar (Referencia):</label>" +
+                    "<input type='text' id='manNota_" + pIdx + "' value="" + curNota + "" placeholder='Ej: Confirmado con Paola en WhatsApp, llevar como préstamo / soporte en Drive...' style='width:100%; padding:6px 8px; border:1px solid #CBD5E1; border-radius:4px; font-size:11.5px; box-sizing:border-box;'></div>" +
+                    "<div style='display:flex; gap:8px; justify-content:flex-end;'>" +
+                    "<button type='button' onclick='toggleManualRefEditor(-1)' style='background:#94A3B8; color:white; border:none; padding:6px 12px; border-radius:4px; font-size:11px; font-weight:600; cursor:pointer;'>Cancelar</button>" +
+                    "<button type='button' onclick='saveManualRefPend(" + pIdx + ")' style='background:#1F618D; color:white; border:none; padding:6px 14px; border-radius:4px; font-size:11px; font-weight:700; cursor:pointer;'>💾 Guardar Referencia (Pintar Azul)</button>" +
+                    "</div></div>";
+            }
+
             var tr = document.createElement("tr");
             if (p.estado_revision === 'CRUZADA_OPCION') {
                 tr.className = "row-cruzada-green";
             } else if (p.estado_revision === 'ANTICIPO_5PASOS') {
                 tr.className = "row-anticipo-amber";
+            } else if (p.estado_revision === 'MANUAL_REF') {
+                tr.className = "row-manual-blue";
             } else {
                 tr.className = "row-sin-revisar";
             }
 
             var protoStyle = p.estado_revision === 'CRUZADA_OPCION'
                 ? "background:#A9DFBF; border-left:4px solid #1E8449; color:#145A32; font-weight:600;"
-                : (p.estado_revision === 'ANTICIPO_5PASOS' ? "background:#F9E79F; border-left:4px solid #D68910; color:#7E5109; font-weight:600;" : "");
+                : (p.estado_revision === 'ANTICIPO_5PASOS'
+                    ? "background:#F9E79F; border-left:4px solid #D68910; color:#7E5109; font-weight:600;"
+                    : (p.estado_revision === 'MANUAL_REF'
+                        ? "background:#D6EAF8; border-left:4px solid #1F618D; color:#154360; font-weight:600;"
+                        : ""));
 
             tr.innerHTML = "<td><b>" + p.fecha + "</b></td>" +
                            "<td>" + p.desc + "</td>" +
@@ -3665,8 +3818,8 @@ def build_workbook_from_saved_json(data: dict) -> io.BytesIO:
     for idx, t in enumerate(data.get('partidas_pendientes', []), 1):
         r = idx + 3
         est_rev = t.get('estado_revision', 'SIN_REVISAR')
-        row_fill = fill_green if est_rev == 'CRUZADA_OPCION' else (fill_yellow if est_rev == 'ANTICIPO_5PASOS' else None)
-        est_lbl = "YA CRUZADA (VERDE)" if est_rev == 'CRUZADA_OPCION' else ("EN ANTICIPO / 5 PASOS (AMARILLO)" if est_rev == 'ANTICIPO_5PASOS' else "PENDIENTE POR MARCAR")
+        row_fill = fill_green if est_rev == 'CRUZADA_OPCION' else (fill_yellow if est_rev == 'ANTICIPO_5PASOS' else (fill_blue if est_rev == 'MANUAL_REF' else None))
+        est_lbl = "YA CRUZADA (VERDE)" if est_rev == 'CRUZADA_OPCION' else ("EN ANTICIPO / 5 PASOS (AMARILLO)" if est_rev == 'ANTICIPO_5PASOS' else ("DEFINIDO MANUALMENTE (AZUL)" if est_rev == 'MANUAL_REF' else "PENDIENTE POR MARCAR"))
         ws_pend.cell(r, 1, idx).alignment = align_center
         ws_pend.cell(r, 2, t.get('fecha', '')).alignment = align_center
         ws_pend.cell(r, 3, t.get('desc', '')).alignment = align_left
@@ -3674,8 +3827,12 @@ def build_workbook_from_saved_json(data: dict) -> io.BytesIO:
         ws_pend.cell(r, 5, t.get('tipo', '')).alignment = align_center
         ws_pend.cell(r, 6, est_lbl).alignment = align_center; ws_pend.cell(r, 6).font = font_bold
         ws_pend.cell(r, 7, t.get('tercero', '')).alignment = align_left
-        opts = t.get('opciones_similares', [])
-        sim_txt = " | ".join([f"{i+1}) {op.get('tercero','')} ({op.get('doc','')}: ${op.get('valor',0):,.2f} -> {op.get('detalle_dif','')})" for i, op in enumerate(opts[:3])])
+        ref_m = t.get('ref_manual')
+        if est_rev == 'MANUAL_REF' and isinstance(ref_m, dict):
+            sim_txt = f"REFERENCIA MANUAL: Tercero: {ref_m.get('tercero','')} | Cuenta/Doc: {ref_m.get('cuenta_doc','')} | Nota: {ref_m.get('nota','')}"
+        else:
+            opts = t.get('opciones_similares', [])
+            sim_txt = " | ".join([f"{i+1}) {op.get('tercero','')} ({op.get('doc','')}: ${op.get('valor',0):,.2f} -> {op.get('detalle_dif','')})" for i, op in enumerate(opts[:3])])
         ws_pend.cell(r, 8, sim_txt or "MANDAR COMO ANTICIPO / PROTOCOLO 5 PASOS").alignment = align_left
         ws_pend.cell(r, 9, t.get('protocolo', '')).alignment = align_left
         for c in range(1, 10):
