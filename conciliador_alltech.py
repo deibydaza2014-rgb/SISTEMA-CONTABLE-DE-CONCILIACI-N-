@@ -691,70 +691,10 @@ class ReconcilerCore:
                     })
                     break
 
-        # 3. Subauxiliares (Azul) - Excluyendo estrictamente REM, DREM, RC y CE
-        EXCLUDED_DOCS = {'RC', 'CE', 'REM', 'DREM'}
-
-        # 3A. Salidas en Cuentas 2 (Proveedores / Nómina / Créditos / TC: FC, FCE, NO, NOM, NC, DS)
-        # Nota: En Cuentas 2 (Pasivos), la causación abierta de una factura, nómina o crédito está en CRÉDITO (o DÉBITO si es pago/abono directo)
-        for t in [x for x in self.extracto_txs if not x.conciliado and x.tipo == 'EGRESO']:
-            best_a = None
-            best_dias = 999
-            for a in self.aux_2:
-                if a.conciliado: continue
-                doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
-                if a.tipo_doc in EXCLUDED_DOCS or doc_pfx in EXCLUDED_DOCS or a.cuenta.startswith('13050502'):
-                    continue
-                if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION']):
-                    continue
-                a_val = a.credito if a.credito > 0 else a.debito
-                if a_val <= 0:
-                    continue
-                if abs(t.valor - a_val) <= 2.0:
-                    dias_dif = abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 0
-                    if dias_dif <= 31 and dias_dif < best_dias:
-                        best_dias = dias_dif
-                        best_a = a
-            if best_a is not None:
-                t.conciliado = True; t.color = "AZUL"
-                t.via_cruce = "Cruzado en Auxiliar Cuentas 2 (Pasivos)"
-                t.comprobante = best_a.doc_num
-                t.tercero = best_a.tercero or "Proveedor / Empleado / Entidad"
-                t.soporte = best_a.concepto or "Factura Compra / Nómina / Obligación"
-                t.cuenta_puc = f"{best_a.cuenta} (Pasivos / Nómina / Créditos)"
-                t.diagnostico = "Operación causada en pasivo según factura, nómina u obligación financiera; pendiente de CE en Bancos."
-                t.protocolo = "Elaborar Comprobante de Egreso (CE) imputando a cuenta 11100502."
-                best_a.conciliado = True
-
-        # 3B. Entradas en Cuentas 13 (Deudores / Cartera: FV, ND, NC)
-        # Nota: En Cuentas 13 (Activos/Cartera), la factura de venta abierta está en DÉBITO (o CRÉDITO si ya es abono)
-        for t in [x for x in self.extracto_txs if not x.conciliado and x.tipo == 'INGRESO']:
-            best_a = None
-            best_dias = 999
-            for a in self.aux_13:
-                if a.conciliado: continue
-                doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
-                if a.tipo_doc in EXCLUDED_DOCS or doc_pfx in EXCLUDED_DOCS or a.cuenta.startswith('13050502'):
-                    continue
-                if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION']):
-                    continue
-                a_val = a.debito if a.debito > 0 else a.credito
-                if a_val <= 0:
-                    continue
-                if abs(t.valor - a_val) <= 2.0:
-                    dias_dif = abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 0
-                    if dias_dif <= 31 and dias_dif < best_dias:
-                        best_dias = dias_dif
-                        best_a = a
-            if best_a is not None:
-                t.conciliado = True; t.color = "AZUL"
-                t.via_cruce = "Cruzado en Auxiliar Cuentas 13 (Clientes)"
-                t.comprobante = best_a.doc_num
-                t.tercero = best_a.tercero or "Cliente Nacional"
-                t.soporte = best_a.concepto or "Factura de Venta"
-                t.cuenta_puc = f"{best_a.cuenta} Clientes / Cartera"
-                t.diagnostico = "Recaudo causado en cartera de clientes según Factura de Venta; pendiente de RC en Bancos."
-                t.protocolo = "Elaborar Recibo de Caja (RC) imputando a cuenta 11100502."
-                best_a.conciliado = True
+        # 3. Subauxiliares (Aux 2 y Aux 13):
+        # Por regla contable del usuario, las Pestañas 2 y 3 muestran ÚNICAMENTE lo ya cruzado en Bancos (Auxiliar 1110 - Verde).
+        # Las facturas/nóminas/obligaciones halladas en Aux 13 y Aux 2 que aún NO tienen RC/CE en 1110 pasan a la Hoja 5
+        # con su documento exacto como Opción 1 recomendada para contabilizar.
 
         # 4. Partidas no cruzadas (Naranja - Protocolo 5 Pasos)
         for t in [x for x in self.extracto_txs if not x.conciliado]:
@@ -1814,7 +1754,7 @@ SPA_HTML = """<!DOCTYPE html>
         <!-- ========================================================= -->
         <div class="tab-content" id="tab2">
             <div class="filter-toolbar">
-                <span style="font-weight: 600; font-size: 13px; color: var(--primary);">Salidas debitadas en banco cruzadas contra Auxiliar 1110 y Cuentas 2</span>
+                <span style="font-weight: 600; font-size: 13px; color: var(--primary);">Salidas debitadas en banco ya contabilizadas y cruzadas contra el Auxiliar 1110</span>
                 <input type="text" class="search-box" id="searchSal" placeholder="Buscar tercero, factura, comprobante..." onkeyup="renderSalidasTable()">
             </div>
             <div class="table-responsive">
@@ -1841,7 +1781,7 @@ SPA_HTML = """<!DOCTYPE html>
         <!-- ========================================================= -->
         <div class="tab-content" id="tab3">
             <div class="filter-toolbar">
-                <span style="font-weight: 600; font-size: 13px; color: var(--primary);">Entradas acreditadas en banco cruzadas contra Auxiliar 1110 y Cuentas 13</span>
+                <span style="font-weight: 600; font-size: 13px; color: var(--primary);">Entradas acreditadas en banco ya contabilizadas y cruzadas contra el Auxiliar 1110</span>
                 <input type="text" class="search-box" id="searchEnt" placeholder="Buscar cliente, factura, recibo..." onkeyup="renderEntradasTable()">
             </div>
             <div class="table-responsive">
@@ -2483,6 +2423,50 @@ SPA_HTML = """<!DOCTYPE html>
             }
         });
         data.partidas_pendientes = pendNonCom;
+
+        // A1. Mover a Hoja 5 cualquier partida AZUL (cruzada solo en Aux 13 / Aux 2 pero sin RC/CE en 1110)
+        // para que Pestañas 2 y 3 muestren SOLO lo cruzado en Libro 1110 (VERDE) y las demás queden como opción en Hoja 5
+        function moveAzulToPend(arr, tipoMov) {
+            var keep = [];
+            (arr || []).forEach(function(item) {
+                if (item.color === "AZUL") {
+                    changed = true;
+                    var pendItem = {
+                        fecha: item.fecha,
+                        desc: item.desc,
+                        valor: item.valor,
+                        tipo: tipoMov,
+                        color: "NARANJA",
+                        conciliado: false,
+                        tiene_tercero: true,
+                        modo_inicial: "OPCION",
+                        estado_revision: "SIN_REVISAR",
+                        tercero: "Sugerido: " + (item.tercero || "Tercero") + " (" + (item.comprobante || "") + ")",
+                        protocolo: "Causar " + (tipoMov === "INGRESO" ? "Recibo de Caja (RC)" : "Comprobante de Egreso (CE)") + " cruzando con " + (item.comprobante || "") + " de " + (item.tercero || "") + " por " + formatMoney(item.valor) + ". 🎯 EXACTO ($0.00 de diferencia)",
+                        opciones_similares: [{
+                            origen: tipoMov === "INGRESO" ? "Aux 13 (Factura Abierta)" : "Aux 2 (Pasivo Abierto)",
+                            doc: item.comprobante || "",
+                            tercero: item.tercero || "",
+                            fecha: item.fecha || "",
+                            concepto: item.soporte || "",
+                            valor: item.valor || 0,
+                            dif: 0.0,
+                            nivel: "EXACTO",
+                            detalle_dif: "🎯 EXACTO ($0.00 de diferencia)",
+                            cumple_regla: true,
+                            name_matched: true
+                        }],
+                        active_opt_idx: 0
+                    };
+                    data.partidas_pendientes.push(pendItem);
+                } else {
+                    keep.push(item);
+                }
+            });
+            return keep;
+        }
+        data.salidas_cruzadas = moveAzulToPend(data.salidas_cruzadas, "EGRESO");
+        data.entradas_cruzadas = moveAzulToPend(data.entradas_cruzadas, "INGRESO");
 
         // A. Reconocer Notas Contables de Intereses o Gastos Bancarios que hayan quedado en reversiones_ajustes
         var remainingRev = [];
