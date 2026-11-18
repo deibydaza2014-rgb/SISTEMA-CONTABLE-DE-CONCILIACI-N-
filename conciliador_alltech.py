@@ -529,7 +529,7 @@ class ReconcilerCore:
                 t.cuenta_puc = "53051502 Cuota de Manejo Bancaria"
                 t.diagnostico = "Cobro periódico por cuota de manejo bancaria."
                 t.protocolo = "Causar en cuenta 53051502 (Cuota de Manejo) por separado."
-            elif any(k in d_u for k in ['COMISION', 'COBRO COMI', 'COBRO TRANSF']) and not any(k in d_u for k in ['CUOTA CREDITO', 'CUOTA DE CREDITO', 'PLANILLA']):
+            elif any(k in d_u for k in ['COMISION', 'COBRO COMI', 'COBRO TRANSF', 'SERVICIO PAGO A OTROS BANCOS', 'SERVICIO PAGO A PROVEEDORES', 'SERVICIO PAGO DE NOMINA', 'SERVICIO PAGO NOMINA', 'SERVICIO PAGO A TERCEROS', 'SERVICIO PAGO']) and not any(k in d_u for k in ['CUOTA CREDITO', 'CUOTA DE CREDITO', 'PLANILLA']):
                 t.conciliado = True; t.color = "AMARILLO"; t.subcategoria = "COMISION"
                 t.via_cruce = "Comisión Transaccional"
                 t.comprobante = "Extracto Bancario"
@@ -694,8 +694,11 @@ class ReconcilerCore:
         # 3. Subauxiliares (Azul) - Excluyendo estrictamente REM, DREM, RC y CE
         EXCLUDED_DOCS = {'RC', 'CE', 'REM', 'DREM'}
 
-        # 3A. Salidas en Cuentas 2 (Proveedores / Nómina / Pasivos: solo FC, FCE, NO, NC)
+        # 3A. Salidas en Cuentas 2 (Proveedores / Nómina / Créditos / TC: FC, FCE, NO, NOM, NC, DS)
+        # Nota: En Cuentas 2 (Pasivos), la causación abierta de una factura, nómina o crédito está en CRÉDITO (o DÉBITO si es pago/abono directo)
         for t in [x for x in self.extracto_txs if not x.conciliado and x.tipo == 'EGRESO']:
+            best_a = None
+            best_dias = 999
             for a in self.aux_2:
                 if a.conciliado: continue
                 doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
@@ -703,22 +706,30 @@ class ReconcilerCore:
                     continue
                 if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION']):
                     continue
-                if abs(t.valor - a.debito) <= 2.0:
+                a_val = a.credito if a.credito > 0 else a.debito
+                if a_val <= 0:
+                    continue
+                if abs(t.valor - a_val) <= 2.0:
                     dias_dif = abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 0
-                    if dias_dif <= tol_dias + 4:
-                        t.conciliado = True; t.color = "AZUL"
-                        t.via_cruce = "Cruzado en Auxiliar Cuentas 2 (Pasivos)"
-                        t.comprobante = a.doc_num
-                        t.tercero = a.tercero or "Proveedor / Empleado"
-                        t.soporte = a.concepto or "Factura Compra / Nómina"
-                        t.cuenta_puc = "2205 Proveedores / 2335 Costos / 2505 Nómina"
-                        t.diagnostico = "Operación causada en pasivo según factura o nómina; pendiente en Bancos."
-                        t.protocolo = "Elaborar Comprobante de Egreso (CE) imputando a cuenta 11100502."
-                        a.conciliado = True
-                        break
+                    if dias_dif <= 31 and dias_dif < best_dias:
+                        best_dias = dias_dif
+                        best_a = a
+            if best_a is not None:
+                t.conciliado = True; t.color = "AZUL"
+                t.via_cruce = "Cruzado en Auxiliar Cuentas 2 (Pasivos)"
+                t.comprobante = best_a.doc_num
+                t.tercero = best_a.tercero or "Proveedor / Empleado / Entidad"
+                t.soporte = best_a.concepto or "Factura Compra / Nómina / Obligación"
+                t.cuenta_puc = f"{best_a.cuenta} (Pasivos / Nómina / Créditos)"
+                t.diagnostico = "Operación causada en pasivo según factura, nómina u obligación financiera; pendiente de CE en Bancos."
+                t.protocolo = "Elaborar Comprobante de Egreso (CE) imputando a cuenta 11100502."
+                best_a.conciliado = True
 
-        # 3B. Entradas en Cuentas 13 (Deudores / Cartera: solo FV, NCCL, ND, NC)
+        # 3B. Entradas en Cuentas 13 (Deudores / Cartera: FV, ND, NC)
+        # Nota: En Cuentas 13 (Activos/Cartera), la factura de venta abierta está en DÉBITO (o CRÉDITO si ya es abono)
         for t in [x for x in self.extracto_txs if not x.conciliado and x.tipo == 'INGRESO']:
+            best_a = None
+            best_dias = 999
             for a in self.aux_13:
                 if a.conciliado: continue
                 doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
@@ -726,19 +737,24 @@ class ReconcilerCore:
                     continue
                 if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION']):
                     continue
-                if abs(t.valor - a.credito) <= 2.0:
+                a_val = a.debito if a.debito > 0 else a.credito
+                if a_val <= 0:
+                    continue
+                if abs(t.valor - a_val) <= 2.0:
                     dias_dif = abs((t.fecha_dt - a.fecha_dt).days) if (t.fecha_dt and a.fecha_dt) else 0
-                    if dias_dif <= tol_dias + 4:
-                        t.conciliado = True; t.color = "AZUL"
-                        t.via_cruce = "Cruzado en Auxiliar Cuentas 13 (Clientes)"
-                        t.comprobante = a.doc_num
-                        t.tercero = a.tercero or "Cliente Nacional"
-                        t.soporte = a.concepto or "Factura de Venta"
-                        t.cuenta_puc = "130505 Clientes / 2805 Anticipos"
-                        t.diagnostico = "Recaudo causado en cartera de clientes según Factura de Venta; pendiente en Bancos."
-                        t.protocolo = "Elaborar Recibo de Caja (RC) imputando a cuenta 11100502."
-                        a.conciliado = True
-                        break
+                    if dias_dif <= 31 and dias_dif < best_dias:
+                        best_dias = dias_dif
+                        best_a = a
+            if best_a is not None:
+                t.conciliado = True; t.color = "AZUL"
+                t.via_cruce = "Cruzado en Auxiliar Cuentas 13 (Clientes)"
+                t.comprobante = best_a.doc_num
+                t.tercero = best_a.tercero or "Cliente Nacional"
+                t.soporte = best_a.concepto or "Factura de Venta"
+                t.cuenta_puc = f"{best_a.cuenta} Clientes / Cartera"
+                t.diagnostico = "Recaudo causado en cartera de clientes según Factura de Venta; pendiente de RC en Bancos."
+                t.protocolo = "Elaborar Recibo de Caja (RC) imputando a cuenta 11100502."
+                best_a.conciliado = True
 
         # 4. Partidas no cruzadas (Naranja - Protocolo 5 Pasos)
         for t in [x for x in self.extracto_txs if not x.conciliado]:
@@ -872,13 +888,11 @@ class ReconcilerCore:
     def _assign_similar_options(self):
         """
         Motor inteligente de sugerencias para la Hoja 5 (Partidas Pendientes):
-        1. Excluye por completo REM, DREM, RC y CE (solo usa documentos de causación: FV, FC, FCE, NO/NOM, NC).
-        2. Excluye estrictamente todas las facturas/documentos que YA están conciliados o pagados en Aux 1110, Aux 13, Aux 2 o en el extracto.
-        3. Si el movimiento del extracto NO tiene nombre del tercero:
-           - Solo recomienda directamente una factura/documento si la diferencia NO supera $1.000 pesos (<= $1.000).
-           - Si supera $1.000 pesos, indica mandarlo como Anticipo (280505 / 1330) o seguir indicaciones del Protocolo, dejando las opciones cercanas disponibles en el botón interactivo.
-        4. Si el movimiento del extracto SÍ tiene nombre del tercero:
-           - Recomienda los documentos abiertos del tercero (o más cercanos) indicando si es EXACTO ($0) o diciendo exactamente cuánto es la diferencia en pesos.
+        1. Excluye REM, DREM, RC y CE; incluye TODAS las cuentas 2 (21xx Créditos/TC, 22xx Proveedores,
+           23xx Costos/Seguridad Social, 24xx Impuestos, 25xx Nómina, 28xx Anticipos) y cuentas 13.
+        2. Agrega totales agrupados de Nómina (NO/NOM) y Facturas (FC/FCE/FV), además de pares combinados (2 facturas).
+        3. Prioriza SIEMPRE los valores más parecidos al movimiento bancario, reconociendo pagos de nómina,
+           cuotas de créditos y tarjetas de crédito (TC).
         """
         from collections import defaultdict
         EXCLUDED_PFX = {'RC', 'CE', 'REM', 'DREM'}
@@ -906,15 +920,20 @@ class ReconcilerCore:
             'CARGO DOMI'
         ]
 
+        def _same_tercero_fuzzy(t1: str, t2: str) -> bool:
+            w1 = {w for w in re.findall(r'[A-Z0-9]{4,}', (t1 or '').upper()) if w not in {'LTDA', 'SAS', 'BANCO', 'BANCOS', 'PAGO', 'ABONO', 'FACTURA'}}
+            w2 = {w for w in re.findall(r'[A-Z0-9]{4,}', (t2 or '').upper()) if w not in {'LTDA', 'SAS', 'BANCO', 'BANCOS', 'PAGO', 'ABONO', 'FACTURA'}}
+            return bool(w1 and w2 and (w1 & w2))
+
         # ------------------------------------------------------------------
-        # A. Construir pool de INGRESOS (Aux 13) SOLO con facturas NO conciliadas
+        # A. Construir pool de INGRESOS (Aux 13) con facturas abiertas
         # ------------------------------------------------------------------
         rc_paid_by_fv = defaultdict(float)
         rc_unassigned_by_tercero = defaultdict(float)
 
         for a in self.aux_13:
             if a.tipo_doc in {'RC', 'NCCL'} and a.credito > 0:
-                nums = re.findall(r'\b(3\d{3})\b', a.concepto)
+                nums = re.findall(r'\b(\d{3,6})\b', a.concepto)
                 if nums:
                     for n in nums:
                         rc_paid_by_fv[n] += a.credito / len(nums)
@@ -924,19 +943,20 @@ class ReconcilerCore:
         aux13_rc_docs = {a.doc_num.strip().lower() for a in self.aux_13 if a.tipo_doc == 'RC'}
         for a in self.aux_1110:
             if a.tipo_doc == 'RC' and a.doc_num.strip().lower() not in aux13_rc_docs and a.debito > 0:
-                nums = re.findall(r'\b(3\d{3})\b', a.concepto)
+                nums = re.findall(r'\b(\d{3,6})\b', a.concepto)
                 if nums:
                     for n in nums:
                         rc_paid_by_fv[n] += a.debito / len(nums)
                 else:
                     rc_unassigned_by_tercero[a.tercero.strip().upper()] += a.debito
 
-        # Movimientos de ingreso del extracto que YA fueron conciliados en la Pestaña 3
         reconciled_ing_txs = [x for x in self.extracto_txs if x.conciliado and x.tipo == 'INGRESO' and x.color != 'AMARILLO']
         used_reconciled_ing_ids = set()
 
         candidate_fvs = []
         for a in self.aux_13:
+            if a.conciliado:
+                continue
             doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
             if a.tipo_doc in EXCLUDED_PFX or doc_pfx in EXCLUDED_PFX or doc_pfx == 'NCCL' or a.cuenta.startswith('13050502'):
                 continue
@@ -945,26 +965,25 @@ class ReconcilerCore:
             val = a.debito if a.debito > 0 else a.credito
             if val <= 0:
                 continue
-            nums = re.findall(r'\b(3\d{3})\b', a.doc_num)
+            nums = re.findall(r'\b(\d{3,6})\b', a.doc_num)
             num = nums[0] if nums else ''
-            # 1) Excluir si ya tiene RC/NCCL aplicado por número de factura
             if num and rc_paid_by_fv[num] >= val - 5.0:
                 rc_paid_by_fv[num] -= val
                 continue
-            # 2) Excluir si ya tiene RC aplicado al mismo tercero por ese valor
             ter_u = a.tercero.strip().upper()
             if rc_unassigned_by_tercero[ter_u] >= val - 1000.0:
                 rc_unassigned_by_tercero[ter_u] -= val
                 continue
             candidate_fvs.append(a)
 
-        # 3) Excluir si el valor de la factura ya cruzó con una entrada conciliada en Pestaña 3 (priorizando fecha más cercana)
         open_fvs = []
         for a in candidate_fvs:
             val = a.debito if a.debito > 0 else a.credito
             matching_txs = [
                 tx for tx in reconciled_ing_txs
-                if id(tx) not in used_reconciled_ing_ids and abs(tx.valor - val) <= 2.0
+                if id(tx) not in used_reconciled_ing_ids
+                and abs(tx.valor - val) <= 2.0
+                and (_same_tercero_fuzzy(tx.tercero, a.tercero) or _same_tercero_fuzzy(tx.desc, a.tercero))
             ]
             if matching_txs:
                 matching_txs.sort(key=lambda tx: abs((tx.fecha_dt - a.fecha_dt).days) if (tx.fecha_dt and a.fecha_dt) else 30)
@@ -973,7 +992,7 @@ class ReconcilerCore:
             open_fvs.append(a)
 
         pool_ing = []
-        fv_groups = defaultdict(lambda: {'val': 0.0, 'tercero': '', 'fecha': '', 'fecha_dt': None, 'concepto': '', 'tipo_doc': '', 'count': 0})
+        fv_groups = defaultdict(lambda: {'val': 0.0, 'tercero': '', 'fecha': '', 'fecha_dt': None, 'concepto': '', 'tipo_doc': '', 'count': 0, 'cuenta': ''})
         for a in open_fvs:
             doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else 'FV'
             val = a.debito if a.debito > 0 else a.credito
@@ -985,6 +1004,8 @@ class ReconcilerCore:
                 'fecha': a.fecha,
                 'fecha_dt': a.fecha_dt,
                 'concepto': a.concepto,
+                'cuenta': a.cuenta,
+                'categoria': 'CARTERA',
                 'valor': val
             })
             g = fv_groups[(a.doc_num, a.tercero)]
@@ -994,6 +1015,7 @@ class ReconcilerCore:
             g['fecha_dt'] = a.fecha_dt
             g['concepto'] = a.concepto
             g['tipo_doc'] = doc_pfx
+            g['cuenta'] = a.cuenta
             g['count'] += 1
 
         for (doc, _), g in fv_groups.items():
@@ -1005,16 +1027,19 @@ class ReconcilerCore:
                     'fecha': g['fecha'],
                     'fecha_dt': g['fecha_dt'],
                     'concepto': f"{g['concepto']} (Saldo Total Abierto)",
+                    'cuenta': g['cuenta'],
+                    'categoria': 'CARTERA',
                     'valor': g['val']
                 })
 
         # ------------------------------------------------------------------
-        # B. Construir pool de EGRESOS (Aux 2) SOLO con FC/FCE/NO/NC NO conciliados
+        # B. Construir pool de EGRESOS (Aux 2) con TODAS las cuentas 2 abiertas:
+        #    Proveedores (22xx/23xx), Nómina (25xx/NO/NOM), Créditos y TC (21xx), Seguridad Social (2370/2380)
         # ------------------------------------------------------------------
         ce_concepts = ' '.join((a.concepto + ' ' + a.doc_num).upper() for a in (self.aux_1110 + self.aux_2) if a.tipo_doc == 'CE')
         ce_by_tercero = defaultdict(float)
         for a in self.aux_2:
-            if a.tipo_doc == 'CE' and (a.cuenta[:4] in {'2105', '2115', '2205', '2210', '2335', '2505'} or a.cuenta == '2'):
+            if a.tipo_doc == 'CE' and (a.cuenta.startswith('2') or a.cuenta == '2'):
                 ce_by_tercero[(a.tercero.strip().upper(), round(a.debito, 0))] += a.debito
 
         reconciled_egr_txs = [x for x in self.extracto_txs if x.conciliado and x.tipo == 'EGRESO' and x.color != 'AMARILLO']
@@ -1022,9 +1047,11 @@ class ReconcilerCore:
 
         aux2_main = [
             a for a in self.aux_2
-            if a.tipo_doc not in {'RC', 'CE', 'REM', 'DREM', 'FV', 'NCCL'}
-            and (a.cuenta[:4] in {'2105', '2115', '2205', '2210', '2335', '2505'} or a.cuenta == '2')
+            if not a.conciliado
+            and a.tipo_doc not in {'RC', 'CE', 'REM', 'DREM', 'FV', 'NCCL'}
+            and (a.cuenta.startswith('2') or a.cuenta == '2')
         ]
+
         # Cancelaciones internas en Aux 2 (ej. factura anulada con nota crédito del mismo tercero y valor)
         cancelled_aux2_ids = set()
         for i, a1 in enumerate(aux2_main):
@@ -1039,7 +1066,7 @@ class ReconcilerCore:
 
         open_egr_keys = set()
         pool_egr = []
-        no_groups = defaultdict(lambda: {'cred': 0.0, 'fecha': '', 'fecha_dt': None, 'concepto': '', 'count': 0})
+        no_groups = defaultdict(lambda: {'cred': 0.0, 'fecha': '', 'fecha_dt': None, 'concepto': '', 'terceros': set(), 'count': 0, 'cuenta': '2505'})
 
         for a in aux2_main:
             if id(a) in cancelled_aux2_ids:
@@ -1047,29 +1074,25 @@ class ReconcilerCore:
             doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
             if doc_pfx in {'RC', 'CE', 'REM', 'DREM', 'FV', 'NCCL'}:
                 continue
-            if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION', 'NDC 62', 'GASTOS BANCARIOS']):
-                continue
-            if doc_pfx in {'NO', 'NOM'} and not (a.cuenta.startswith('2505') or a.cuenta == '2'):
+            if any(k in (a.doc_num + ' ' + a.concepto).upper() for k in ['DREM', 'DEVOLUCION', 'NDC 62', 'NDC 195', 'GASTOS BANCARIOS', 'INTERESES BANCARIOS']):
                 continue
             val = a.credito if a.credito > 0 else a.debito
             if val <= 0:
                 continue
 
-            # 1) Excluir si el número de documento (BGT X, DS X, FCE X, NDC X) ya aparece pagado en un CE
             m_num = re.search(r'(BGT\s*\d+|DS\s*\d+|FCE\s*\d+|NDC\s*\d+)', a.doc_num.upper())
             if m_num:
                 tok = re.sub(r'\s+', ' ', m_num.group(1))
                 if tok in re.sub(r'\s+', ' ', ce_concepts):
                     continue
-            # 2) Excluir si ya tiene CE por el mismo tercero y valor
             if (a.tercero.strip().upper(), round(val, 0)) in ce_by_tercero:
                 continue
-            if 'PARRA BUSTOS CESAR' in a.tercero.upper() and round(val, 0) == 1274548:
-                continue
-            # 3) Excluir si ya cruzó con un egreso conciliado del extracto en Pestaña 2
+
             matching_egr = [
                 tx for tx in reconciled_egr_txs
-                if id(tx) not in used_reconciled_egr_ids and abs(tx.valor - val) <= 2.0
+                if id(tx) not in used_reconciled_egr_ids
+                and abs(tx.valor - val) <= 2.0
+                and (_same_tercero_fuzzy(tx.tercero, a.tercero) or _same_tercero_fuzzy(tx.desc, a.tercero))
             ]
             if matching_egr:
                 matching_egr.sort(key=lambda tx: abs((tx.fecha_dt - a.fecha_dt).days) if (tx.fecha_dt and a.fecha_dt) else 30)
@@ -1077,36 +1100,72 @@ class ReconcilerCore:
                 continue
 
             open_egr_keys.add((a.doc_num.strip().upper(), a.tercero.strip().upper()))
-            if doc_pfx in {'NO', 'NOM'}:
-                pool_egr.append({
-                    'origen': 'Aux 2 (Nómina 2505 Abierta)',
-                    'doc': a.doc_num,
-                    'tercero': a.tercero or 'Empleado Nómina',
-                    'fecha': a.fecha,
-                    'fecha_dt': a.fecha_dt,
-                    'concepto': a.concepto,
-                    'valor': val
-                })
+            cta_s = (a.cuenta or '').strip()
+            conc_u = (a.concepto or '').upper()
+            terc_u = (a.tercero or '').upper()
+
+            if doc_pfx in {'NO', 'NOM'} or cta_s.startswith('25'):
+                cat_egr = 'NOMINA'
+                origen_lbl = 'Aux 2 (Nómina 25xx Abierta)'
+                terc_lbl = a.tercero or 'Empleado Nómina'
+            elif cta_s.startswith('2120') or any(k in conc_u or k in terc_u for k in ['TARJETA', 'VISA', 'MASTERCARD', 'TC ']):
+                cat_egr = 'TC'
+                origen_lbl = f'Aux 2 (Tarjeta de Crédito {cta_s})'
+                terc_lbl = a.tercero or 'Tarjeta de Crédito'
+            elif cta_s.startswith('21'):
+                cat_egr = 'CREDITO'
+                origen_lbl = f'Aux 2 (Obligación / Crédito {cta_s})'
+                terc_lbl = a.tercero or 'Entidad Financiera / Crédito'
+            elif cta_s.startswith('2370') or cta_s.startswith('2380'):
+                cat_egr = 'SOI'
+                origen_lbl = f'Aux 2 (Seguridad Social {cta_s})'
+                terc_lbl = a.tercero or 'Seguridad Social / Aportes'
+            else:
+                cat_egr = 'PROVEEDOR'
+                label_egr = "Factura FC Abierta" if doc_pfx in {"FC", "FCE"} else (f"Doc {doc_pfx} Abierto" if doc_pfx else f"Cta {cta_s}")
+                origen_lbl = f'Aux 2 ({label_egr})'
+                terc_lbl = a.tercero or 'Proveedor / Pasivo'
+
+            pool_egr.append({
+                'origen': origen_lbl,
+                'doc': a.doc_num,
+                'tercero': terc_lbl,
+                'fecha': a.fecha,
+                'fecha_dt': a.fecha_dt,
+                'concepto': a.concepto,
+                'cuenta': cta_s,
+                'categoria': cat_egr,
+                'valor': val
+            })
+
+            if doc_pfx in {'NO', 'NOM'} or cta_s.startswith('2505'):
                 ng = no_groups[a.doc_num]
                 ng['cred'] += val
                 ng['fecha'] = a.fecha
                 ng['fecha_dt'] = a.fecha_dt
                 ng['concepto'] = a.concepto
+                if a.tercero:
+                    ng['terceros'].add(a.tercero)
+                ng['cuenta'] = cta_s
                 ng['count'] += 1
-            else:
-                label_egr = "Factura FC Abierta" if doc_pfx in {"FC", "FCE"} else f"Nota {doc_pfx} Abierta"
+
+        # Agregar totales consolidados de Nómina (ej. pago total de planilla de nómina a varios empleados)
+        for doc_no, ng in no_groups.items():
+            if ng['count'] > 1 and ng['cred'] > 0:
                 pool_egr.append({
-                    'origen': f'Aux 2 ({label_egr})',
-                    'doc': a.doc_num,
-                    'tercero': a.tercero or 'Proveedor / Pasivo',
-                    'fecha': a.fecha,
-                    'fecha_dt': a.fecha_dt,
-                    'concepto': a.concepto,
-                    'valor': val
+                    'origen': 'Aux 2 (Total Nómina Consolidada)',
+                    'doc': doc_no,
+                    'tercero': f"Nómina Total ({ng['count']} empleados)",
+                    'fecha': ng['fecha'],
+                    'fecha_dt': ng['fecha_dt'],
+                    'concepto': f"{ng['concepto']} (Suma total nómina {doc_no})",
+                    'cuenta': ng['cuenta'],
+                    'categoria': 'NOMINA',
+                    'valor': round(ng['cred'], 2)
                 })
 
-        # Agregar el valor total causado antes de retenciones SOLO para facturas FC/FCE/NC que siguen abiertas
-        fc_groups = defaultdict(lambda: {'cred': 0.0, 'tercero': '', 'fecha': '', 'fecha_dt': None, 'conceptos': [], 'tipo_doc': '', 'count': 0})
+        # Agregar el valor total causado antes de retenciones para facturas FC/FCE/NC abiertas
+        fc_groups = defaultdict(lambda: {'cred': 0.0, 'tercero': '', 'fecha': '', 'fecha_dt': None, 'conceptos': [], 'tipo_doc': '', 'cuenta': '', 'count': 0})
         for a in self.aux_2:
             doc_pfx = a.doc_num.split()[0].upper() if a.doc_num else ''
             if doc_pfx in {'FC', 'FCE', 'NC'}:
@@ -1118,6 +1177,7 @@ class ReconcilerCore:
                     g['fecha'] = a.fecha
                     g['fecha_dt'] = a.fecha_dt
                     g['tipo_doc'] = doc_pfx
+                    g['cuenta'] = a.cuenta
                     g['count'] += 1
                     if a.concepto and a.concepto not in g['conceptos']:
                         g['conceptos'].append(a.concepto)
@@ -1131,27 +1191,61 @@ class ReconcilerCore:
                     'fecha': g['fecha'],
                     'fecha_dt': g['fecha_dt'],
                     'concepto': ' + '.join(g['conceptos'][:2]) + ' (Total antes de ret.)',
+                    'cuenta': g['cuenta'],
+                    'categoria': 'PROVEEDOR',
                     'valor': g['cred']
                 })
 
         # ------------------------------------------------------------------
-        # C. Evaluar cada partida pendiente según las reglas del usuario
+        # C. Evaluar cada partida pendiente priorizando SIEMPRE el valor más parecido
         # ------------------------------------------------------------------
-        stop_words = {'PAGO', 'TRANSFERENCIA', 'VIRTUAL', 'CONSIGNACION', 'CORRESPONSAL', 'CANAL', 'DESDE', 'NEQUI', 'TRASLADO', 'OTROS', 'BANCOS', 'LOCAL', 'EFECTIVO', 'BARRIO', 'AGOST', 'SUC', 'CTA', 'PROV', 'INTERBANC', 'CORRESPONSA', 'TRANSFERENCIAS', 'COMPRA', 'PROGRAMADO', 'INICIAL', 'PYME', 'PROTEGIDO'}
+        stop_words = {'PAGO', 'TRANSFERENCIA', 'VIRTUAL', 'CONSIGNACION', 'CORRESPONSAL', 'CANAL', 'DESDE', 'NEQUI', 'TRASLADO', 'OTROS', 'BANCOS', 'LOCAL', 'EFECTIVO', 'BARRIO', 'AGOST', 'SUC', 'CTA', 'PROV', 'INTERBANC', 'CORRESPONSA', 'TRANSFERENCIAS', 'COMPRA', 'PROGRAMADO', 'INICIAL', 'PYME', 'PROTEGIDO', 'CUOTA', 'CREDITO', 'NOMINA', 'BANCOLOMBIA', 'DAVIVIENDA', 'VISA', 'MASTERCARD'}
 
         for t in [x for x in self.extracto_txs if not x.conciliado]:
             d_u = t.desc.upper().strip()
             t.tiene_tercero = not any(gp in d_u for gp in GENERIC_PATTERNS)
-            pool = pool_ing if t.tipo == 'INGRESO' else pool_egr
+            pool = list(pool_ing if t.tipo == 'INGRESO' else pool_egr)
+
+            # Detectar intención del movimiento bancario (Nómina, Crédito, TC, Seguridad Social)
+            es_nomina_tx = any(k in d_u for k in ['NOMINA', 'NÓMINA', 'SALARIO', 'SUELDO', 'LIQUIDACION', 'NEQUI'])
+            es_tc_tx = any(k in d_u for k in ['TC VISA', 'VISA', 'MASTERCARD', 'TARJETA', 'T.CRED', 'TC '])
+            es_credito_tx = any(k in d_u for k in ['CUOTA CREDITO', 'CREDITO', 'CRÉDITO', 'OBLIGACION', 'BOLD CAPITAL', 'LEASING'])
+            es_soi_tx = any(k in d_u for k in ['PLANILLA', 'SOI', 'APORTES', 'SEGURIDAD SOCIAL'])
+
+            # Agregar combinaciones de 2 documentos del mismo tercero (o misma categoría) cuando la suma es muy cercana (< 2% dif)
+            if len(pool) >= 2:
+                by_tercero_pool = defaultdict(list)
+                for it in pool:
+                    if it['valor'] < t.valor:
+                        by_tercero_pool[it['tercero'].strip().upper()].append(it)
+                for ter_k, items_t in by_tercero_pool.items():
+                    if 2 <= len(items_t) <= 8:
+                        for i1 in range(len(items_t)):
+                            for i2 in range(i1 + 1, len(items_t)):
+                                it1, it2 = items_t[i1], items_t[i2]
+                                if it1['doc'] == it2['doc']:
+                                    continue
+                                s_val = round(it1['valor'] + it2['valor'], 2)
+                                if abs(s_val - t.valor) <= max(1000.0, t.valor * 0.015):
+                                    pool.append({
+                                        'origen': 'Suma 2 Docs mismo Tercero',
+                                        'doc': f"{it1['doc']} + {it2['doc']}",
+                                        'tercero': it1['tercero'],
+                                        'fecha': it1['fecha'],
+                                        'fecha_dt': it1['fecha_dt'],
+                                        'concepto': f"Suma: {it1['doc']} (${it1['valor']:,.2f}) + {it2['doc']} (${it2['valor']:,.2f})",
+                                        'cuenta': it1.get('cuenta', ''),
+                                        'categoria': it1.get('categoria', 'PROVEEDOR'),
+                                        'valor': s_val
+                                    })
 
             scored = []
             for item in pool:
                 diff = abs(item['valor'] - t.valor)
                 rel_diff = diff / max(t.valor, 1.0)
                 days_diff = abs((t.fecha_dt - item['fecha_dt']).days) if (t.fecha_dt and item['fecha_dt']) else 15
-                date_penalty = (days_diff / 31.0) * 0.03
+                date_penalty = (days_diff / 31.0) * 0.02
 
-                # Detectar si hay un NIT/CC en la descripción bancaria (ej. Davivienda) y resolver el nombre del tercero
                 nit_tercero_name = None
                 for num_tok in re.findall(r'\b(\d{8,11})\b', d_u):
                     if num_tok in NIT_TERCEROS_MAP:
@@ -1176,21 +1270,42 @@ class ReconcilerCore:
                                 break
                     if 'TELECOMU' in d_u and ('ETB' in item['tercero'].upper() or 'TELEFONO' in item['concepto'].upper()):
                         name_matched = True
-                    if 'NOMINA' in d_u and item['doc'].upper().startswith('NO'):
-                        name_matched = True
 
-                doc_bonus = (-0.035 if ('NEQUI' in d_u and any(k in item['doc'].upper() for k in ['NO', 'NOM', 'DS'])) else (-0.005 if any(k in item['doc'].upper() for k in ['FV', 'FC', 'FCE', 'NO']) else -0.002))
+                cat_it = item.get('categoria', '')
+                cat_matched = (
+                    (es_nomina_tx and cat_it == 'NOMINA')
+                    or (es_tc_tx and cat_it == 'TC')
+                    or (es_credito_tx and cat_it == 'CREDITO')
+                    or (es_soi_tx and cat_it == 'SOI')
+                )
+
+                # Prioridad equilibrada:
+                # 0: Exacto (<= $100) + tercero/categoría
+                # 1: Exacto en valor (<= $2)
+                # 2: Muy cercano en valor (<= $1,000 o <= 2% de diferencia)
+                # 3: Mismo tercero o misma categoría (Nómina/Crédito/TC/SOI) con valor razonablemente cercano (<= 35% dif)
+                # 4: Valores más parecidos en general (ordenados estrictamente por menor diferencia en valor)
+                if diff <= 100.0 and (name_matched or cat_matched):
+                    priority = 0
+                elif diff <= 2.0:
+                    priority = 1
+                elif diff <= 1000.0 or rel_diff <= 0.02:
+                    priority = 2
+                elif (name_matched or cat_matched) and rel_diff <= 0.35:
+                    priority = 3
+                else:
+                    priority = 4
+
+                doc_bonus = -0.01 if cat_matched else (-0.005 if any(k in item['doc'].upper() for k in ['FV', 'FC', 'FCE', 'NO', 'NOM']) else 0.0)
                 score = rel_diff + date_penalty + doc_bonus
-                # Priorizar: 1) Exacto + mismo tercero/NIT (-1), 2) Exacto (0), 3) Mismo tercero/NIT (1), 4) Menor diferencia relativa (2)
-                priority = -1 if (diff <= 1.0 and name_matched) else (0 if diff <= 1.0 else (1 if name_matched else 2))
-                scored.append((priority, score, diff, days_diff, name_matched, item))
+                scored.append((priority, score, diff, days_diff, (name_matched or cat_matched), item))
 
             scored.sort(key=lambda x: (x[0], x[1], x[2]))
 
             top_options = []
             seen = set()
             for prio, sc, diff, days_d, name_m, it in scored:
-                key = (it['doc'].strip().upper(), it['tercero'].strip().upper())
+                key = (it['doc'].strip().upper(), it['tercero'].strip().upper(), round(it['valor'], 2))
                 if key in seen:
                     continue
                 seen.add(key)
@@ -1200,16 +1315,16 @@ class ReconcilerCore:
                     detalle_dif = "🎯 EXACTO ($0.00 de diferencia)"
                 elif diff <= 1000.0:
                     nivel = "DIF <= $1.000"
-                    sentido = "Factura mayor" if it['valor'] > t.valor else "Pago mayor"
+                    sentido = "Doc mayor" if it['valor'] > t.valor else "Pago mayor"
                     detalle_dif = f"✅ Diferencia menor a $1.000: ${diff:,.2f} ({sentido})"
                 else:
-                    nivel = "CON TERCERO" if name_m else "CERCANO (> $1.000)"
+                    nivel = "CON TERCERO / CAT" if name_m else "CERCANO (> $1.000)"
                     if it['valor'] > t.valor:
-                        detalle_dif = f"⚖️ Diferencia exacta: ${diff:,.2f} (Factura mayor por ${diff:,.2f} -> Abono parcial)"
+                        detalle_dif = f"⚖️ Diferencia exacta: ${diff:,.2f} (Doc mayor por ${diff:,.2f} -> Abono parcial)"
                     else:
                         detalle_dif = f"⚖️ Diferencia exacta: ${diff:,.2f} (Pago mayor por ${diff:,.2f} -> Excedente a anticipo/ajuste)"
 
-                cumple_regla = True if t.tiene_tercero else (diff <= 1000.0)
+                cumple_regla = True if (t.tiene_tercero or name_m or diff <= 1000.0) else False
                 top_options.append({
                     "origen": it['origen'],
                     "doc": it['doc'],
@@ -1228,29 +1343,30 @@ class ReconcilerCore:
 
             t.opciones_similares = top_options
 
-            # Determinar modo inicial según la regla estricta del usuario:
-            # - Si NO tiene nombre del tercero: solo recomienda opción si su diferencia <= $1.000; si es mayor a $1.000, inicia en ANTICIPO / PROTOCOLO.
-            # - Si SÍ tiene nombre del tercero: inicia en la mejor opción diciendo si es exacto o cuánto es la diferencia.
             if not t.tiene_tercero:
-                # Caso especial: Créditos bancarios, Planilla SOI o Domiciliaciones sin factura en Aux 2
-                if any(k in d_u for k in ['CUOTA CREDITO', 'PAGO DE CUOTA DE CREDITO', 'PAGO CREDITO MOVIL']):
+                # Si es crédito, TC o SOI pero SÍ hay una opción exacta o muy cercana (<= $1,000 o categoría coincidente <= 10%), recomendarla de una vez
+                if top_options and (top_options[0]['dif'] <= 1000.0 or (top_options[0]['name_matched'] and top_options[0]['dif'] <= max(5000.0, t.valor * 0.05))):
+                    t.modo_inicial = "OPCION"
+                    best = top_options[0]
+                    t.tercero = f"Recomendado ({best['origen']}): {best['tercero']} ({best['doc']})"
+                    t.protocolo = f"Cruzar con {best['doc']} (${best['valor']:,.2f} | {best['detalle_dif']}). Si no corresponde, usa el botón para ver otra opción o escribir cómo se lleva."
+                elif es_tc_tx:
                     t.modo_inicial = "ANTICIPO"
-                    t.tercero = "Obligación Financiera Bancaria (Cta 2105)"
+                    t.tercero = "Pago Tarjeta de Crédito Empresarial (Cta 2120 / 2105)"
+                    t.protocolo = "Elaborar Comprobante de Egreso (CE) imputando al pago de Tarjeta de Crédito (2120/2105) e intereses/cuota si aplica."
+                elif es_credito_tx:
+                    t.modo_inicial = "ANTICIPO"
+                    t.tercero = "Obligación Financiera Bancaria / Crédito (Cta 2105)"
                     t.protocolo = "Elaborar Comprobante de Egreso (CE) imputando a cuenta 2105 Obligaciones Financieras e intereses según tabla de amortización."
-                elif 'PLANILLA UNICA SOI' in d_u:
+                elif es_soi_tx:
                     t.modo_inicial = "ANTICIPO"
                     t.tercero = "Operador Planilla SOI (Seguridad Social 2370/2380)"
                     t.protocolo = "Elaborar Comprobante de Egreso (CE) cruzando pago de aportes de seguridad social (cuentas 2370 y 2380)."
-                elif top_options and top_options[0]['dif'] <= 1000.0:
-                    t.modo_inicial = "OPCION"
-                    best = top_options[0]
-                    t.tercero = f"Recomendado (Dif <= $1.000): {best['tercero']} ({best['doc']})"
-                    t.protocolo = f"Cruzar con {best['doc']} (${best['valor']:,.2f} | {best['detalle_dif']}). Si no corresponde, usa el botón para ver otra opción o mandar a Anticipo."
                 else:
                     t.modo_inicial = "ANTICIPO"
                     cta_ant = "280505 Anticipos de Clientes" if t.tipo == "INGRESO" else "133005 Anticipos a Proveedores / 2505 Nómina"
                     t.tercero = "Sin Tercero en Extracto (Dif. > $1.000) -> Anticipo / Protocolo"
-                    t.protocolo = f"Sin factura abierta con diferencia <= $1.000. Mandar como Anticipo ({cta_ant}) o aplicar Protocolo 5 Pasos: 1) Drive, 2) Grupos, 3) Contador Yeiner, 4) Tesorera Paola."
+                    t.protocolo = f"Sin documento abierto con diferencia <= $1.000. Mandar como Anticipo ({cta_ant}), revisar opciones cercanas o escribir manualmente cómo se lleva."
             else:
                 nit_detected = None
                 for num_tok in re.findall(r'\b(\d{8,11})\b', d_u):
@@ -1267,17 +1383,16 @@ class ReconcilerCore:
                     t.protocolo = "Cruzar traslado entre cuentas bancarias propias (1110 Davivienda -> 11100502 Bancolombia)."
                 elif top_options:
                     best = top_options[0]
-                    if best['name_matched'] or best['dif'] <= 1000.0 or 'PAGO QR' in d_u:
+                    if best['name_matched'] or best['dif'] <= 1000.0 or (best['dif'] / max(t.valor, 1.0)) <= 0.05 or 'PAGO QR' in d_u:
                         t.modo_inicial = "OPCION"
                         base_ter = nit_detected if nit_detected else t.tercero
                         t.tercero = f"{base_ter} -> Sugerido: {best['tercero']} ({best['doc']})" if base_ter not in ["Tercero Pendiente por Identificar", "Cliente Código QR Bancolombia"] else f"Sugerido ({best['origen']}): {best['tercero']} ({best['doc']})"
-                        t.protocolo = f"Tercero en extracto: Cruzar con {best['doc']} (${best['valor']:,.2f}). {best['detalle_dif']}."
+                        t.protocolo = f"Sugerencia más cercana: Cruzar con {best['doc']} (${best['valor']:,.2f}). {best['detalle_dif']}."
                     else:
-                        # El extracto trae nombre/NIT de un tercero específico (ej. VIMECO, D'COTA FE3225, FINANTODO, EL VELENO), pero ese tercero no tiene factura abierta en enero
                         t.modo_inicial = "ANTICIPO"
                         ter_label = nit_detected if nit_detected else t.desc
-                        t.tercero = f"Tercero en Extracto: {ter_label} (Sin factura en Auxiliar de Enero)"
-                        t.protocolo = f"El tercero del extracto ({ter_label}) no tiene factura abierta en este auxiliar. Causar factura/compra, cruzar contra saldo de cartera 2025 o registrar Anticipo."
+                        t.tercero = f"Tercero en Extracto: {ter_label} (Sin factura exacta en Auxiliar)"
+                        t.protocolo = f"El tercero del extracto ({ter_label}) no tiene factura exacta abierta en este auxiliar. Revisa las opciones cercanas por valor o escribe manualmente cómo se lleva."
                 else:
                     t.modo_inicial = "ANTICIPO"
 
@@ -2334,6 +2449,41 @@ SPA_HTML = """<!DOCTYPE html>
 
         var changed = false;
 
+        // A0. Rescatar de partidas_pendientes cualquier comisión bancaria tipo "SERVICIO PAGO A OTROS BANCOS" / "SERVICIO PAGO A PROVEEDORES"
+        var pendNonCom = [];
+        data.partidas_pendientes.forEach(function(p) {
+            var du = (p.desc || "").trim().toUpperCase();
+            var esComisionServicio = (
+                du.includes("SERVICIO PAGO A OTROS BANCOS") ||
+                du.includes("SERVICIO PAGO A PROVEEDORES") ||
+                du.includes("SERVICIO PAGO DE NOMINA") ||
+                du.includes("SERVICIO PAGO NOMINA") ||
+                du.includes("SERVICIO PAGO A TERCEROS") ||
+                du.includes("SERVICIO PAGO") ||
+                du.includes("COBRO COMI") ||
+                du.includes("COBRO TRANSF")
+            ) && !du.includes("CUOTA CREDITO") && !du.includes("PLANILLA");
+            if (esComisionServicio) {
+                changed = true;
+                var gbItem = Object.assign({}, p, {
+                    conciliado: true,
+                    color: "AMARILLO",
+                    subcategoria: "COMISION",
+                    via_cruce: "Comisión Transaccional",
+                    comprobante: "Extracto Bancario",
+                    tercero: "ENTIDAD FINANCIERA",
+                    soporte: "Comisión por Transferencia / Giro / Dispersión Proveedores u Otros Bancos",
+                    cuenta_puc: "53051505 Comisiones Bancarias",
+                    diagnostico: "Comisión bancaria por servicio de pago a proveedores u otros bancos.",
+                    protocolo: "Causar en cuenta 53051505 (Comisiones Bancarias) por separado."
+                });
+                data.gastos_bancarios.push(gbItem);
+            } else {
+                pendNonCom.push(p);
+            }
+        });
+        data.partidas_pendientes = pendNonCom;
+
         // A. Reconocer Notas Contables de Intereses o Gastos Bancarios que hayan quedado en reversiones_ajustes
         var remainingRev = [];
         data.reversiones_ajustes.forEach(function(r) {
@@ -2712,7 +2862,7 @@ SPA_HTML = """<!DOCTYPE html>
                 g.via_cruce = "Cuota de Manejo";
                 g.cuenta_puc = "53051502 Cuota de Manejo Bancaria";
                 g.protocolo = "Causar en cuenta 53051502 (Cuota de Manejo) por separado.";
-            } else if (du.includes("COMISION") || du.includes("COBRO COMI") || du.includes("COBRO TRANSF")) {
+            } else if (du.includes("COMISION") || du.includes("COBRO COMI") || du.includes("COBRO TRANSF") || du.includes("SERVICIO PAGO A OTROS BANCOS") || du.includes("SERVICIO PAGO A PROVEEDORES") || du.includes("SERVICIO PAGO DE NOMINA") || du.includes("SERVICIO PAGO NOMINA") || du.includes("SERVICIO PAGO A TERCEROS") || du.includes("SERVICIO PAGO")) {
                 g.subcategoria = "COMISION";
                 g.via_cruce = "Comisión Transaccional";
                 g.cuenta_puc = "53051505 Comisiones Bancarias";
