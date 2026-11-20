@@ -1731,6 +1731,8 @@ SPA_HTML = """<!DOCTYPE html>
                 <input type="text" class="search-box" id="searchGb" placeholder="Buscar concepto o valor..." onkeyup="renderGastosTable()">
             </div>
 
+            <div id="dupWarningBanner" style="display:none; background:#FDEDEC; border:1px solid #E74C3C; border-left:5px solid #C0392B; color:#922B21; padding:10px 14px; border-radius:8px; margin-bottom:12px; font-size:12.5px;"></div>
+
             <div class="table-responsive">
                 <table>
                     <thead>
@@ -3207,23 +3209,102 @@ SPA_HTML = """<!DOCTYPE html>
         renderPendientesTable();
     }
 
+    function getOptionDocKey(op) {
+        if (!op) return "";
+        return (
+            String(op.doc || "").trim().toUpperCase() + "|" +
+            String(op.tercero || "").trim().toUpperCase() + "|" +
+            Math.round(parseFloat(op.valor || 0))
+        );
+    }
+
+    function getUsedOptionsMap(excludeIdx) {
+        var used = {};
+        if (!auditData || !auditData.partidas_pendientes) return used;
+        auditData.partidas_pendientes.forEach(function(item, j) {
+            if (j === excludeIdx) return;
+            if (item.estado_revision === 'CRUZADA_OPCION') {
+                var opts = item.opciones_similares || [];
+                var idx = item.active_opt_idx;
+                if (typeof idx === 'number' && idx >= 0 && idx < opts.length) {
+                    var k = getOptionDocKey(opts[idx]);
+                    if (k) {
+                        if (!used[k]) used[k] = [];
+                        used[k].push({
+                            idx: j,
+                            fecha: item.fecha || "",
+                            desc: item.desc || "",
+                            valor: item.valor || 0,
+                            doc: opts[idx].doc || "",
+                            tercero: opts[idx].tercero || ""
+                        });
+                    }
+                }
+            }
+        });
+        return used;
+    }
+
+    function getAvailableOptionIndices(p, pIdx, usedMap) {
+        var opts = p.opciones_similares || [];
+        var avail = [];
+        for (var i = 0; i < opts.length; i++) {
+            var k = getOptionDocKey(opts[i]);
+            if (!usedMap[k]) {
+                avail.push(i);
+            }
+        }
+        return avail;
+    }
+
+    function refreshUnusedOptionsAcrossPendientes() {
+        if (!auditData || !auditData.partidas_pendientes) return;
+        var usedGlobal = getUsedOptionsMap(-1);
+        auditData.partidas_pendientes.forEach(function(item, j) {
+            if (item.estado_revision !== 'SIN_REVISAR') return;
+            var opts = item.opciones_similares || [];
+            if (typeof item.active_opt_idx === 'undefined') {
+                item.active_opt_idx = (item.modo_inicial === 'ANTICIPO') ? -1 : 0;
+            }
+            if (item.active_opt_idx >= 0 && item.active_opt_idx < opts.length) {
+                var curKey = getOptionDocKey(opts[item.active_opt_idx]);
+                if (usedGlobal[curKey]) {
+                    // La factura que tenía sugerida ya fue usada en otra fila -> saltar a la siguiente disponible
+                    var avail = getAvailableOptionIndices(item, j, usedGlobal);
+                    item.active_opt_idx = avail.length > 0 ? avail[0] : -1;
+                    syncPendRowState(item);
+                }
+            }
+        });
+    }
+
     function nextOptionPend(pIdx) {
         if (!auditData || !auditData.partidas_pendientes[pIdx]) return;
         var p = auditData.partidas_pendientes[pIdx];
-        var opts = p.opciones_similares || [];
+        var usedMap = getUsedOptionsMap(pIdx);
+        var avail = getAvailableOptionIndices(p, pIdx, usedMap);
+
         if (typeof p.active_opt_idx === 'undefined') {
-            p.active_opt_idx = (p.modo_inicial === 'ANTICIPO') ? -1 : 0;
+            p.active_opt_idx = (p.modo_inicial === 'ANTICIPO') ? -1 : (avail.length > 0 ? avail[0] : -1);
         }
         p.confirmada = false;
         p.estado_revision = 'SIN_REVISAR';
-        if (opts.length === 0) {
+
+        if (avail.length === 0) {
             p.active_opt_idx = -1;
         } else if (p.active_opt_idx === -1) {
-            p.active_opt_idx = 0;
-        } else if (p.active_opt_idx + 1 < opts.length) {
-            p.active_opt_idx = p.active_opt_idx + 1;
+            p.active_opt_idx = avail[0];
         } else {
-            p.active_opt_idx = -1;
+            var pos = avail.indexOf(p.active_opt_idx);
+            if (pos >= 0 && pos + 1 < avail.length) {
+                p.active_opt_idx = avail[pos + 1];
+            } else if (pos === -1) {
+                // Buscar primera disponible mayor que active_opt_idx
+                var nextHigher = avail.find(function(x){ return x > p.active_opt_idx; });
+                p.active_opt_idx = (typeof nextHigher !== 'undefined') ? nextHigher : -1;
+            } else {
+                p.active_opt_idx = -1;
+            }
         }
         syncPendRowState(p);
         saveCurrentAuditToMonth();
@@ -3238,6 +3319,7 @@ SPA_HTML = """<!DOCTYPE html>
         p.estado_revision = 'ANTICIPO_5PASOS';
         activeManualEditIdx = -1;
         syncPendRowState(p);
+        refreshUnusedOptionsAcrossPendientes();
         saveCurrentAuditToMonth();
         renderPendientesTable();
     }
@@ -3245,13 +3327,36 @@ SPA_HTML = """<!DOCTYPE html>
     function confirmOptionPend(pIdx) {
         if (!auditData || !auditData.partidas_pendientes[pIdx]) return;
         var p = auditData.partidas_pendientes[pIdx];
-        if (typeof p.active_opt_idx === 'undefined' || p.active_opt_idx < 0) {
-            p.active_opt_idx = 0;
+        var opts = p.opciones_similares || [];
+        var usedMap = getUsedOptionsMap(pIdx);
+
+        if (typeof p.active_opt_idx === 'undefined' || p.active_opt_idx < 0 || p.active_opt_idx >= opts.length) {
+            var avail = getAvailableOptionIndices(p, pIdx, usedMap);
+            if (avail.length === 0) {
+                alert("Todas las opciones sugeridas para esta fila ya fueron usadas en otras partidas.");
+                return;
+            }
+            p.active_opt_idx = avail[0];
         }
+
+        var chosenOp = opts[p.active_opt_idx];
+        var chosenKey = getOptionDocKey(chosenOp);
+        if (usedMap[chosenKey] && usedMap[chosenKey].length > 0) {
+            var prev = usedMap[chosenKey][0];
+            alert("⚠️ La factura/documento " + chosenOp.doc + " (" + chosenOp.tercero + ") ya fue validada y cruzada en otra partida (" + prev.fecha + " — " + prev.desc + " por " + formatMoney(prev.valor) + "). Se avanzará a la siguiente opción disponible para evitar duplicados.");
+            var avail2 = getAvailableOptionIndices(p, pIdx, usedMap);
+            p.active_opt_idx = avail2.length > 0 ? avail2[0] : -1;
+            syncPendRowState(p);
+            renderPendientesTable();
+            return;
+        }
+
         p.confirmada = true;
         p.estado_revision = 'CRUZADA_OPCION';
         activeManualEditIdx = -1;
         syncPendRowState(p);
+        // Bloquear esta factura en todas las demás filas pendientes sin revisar
+        refreshUnusedOptionsAcrossPendientes();
         saveCurrentAuditToMonth();
         renderPendientesTable();
     }
@@ -3262,6 +3367,7 @@ SPA_HTML = """<!DOCTYPE html>
         p.confirmada = false;
         p.estado_revision = 'SIN_REVISAR';
         syncPendRowState(p);
+        refreshUnusedOptionsAcrossPendientes();
         saveCurrentAuditToMonth();
         renderPendientesTable();
     }
@@ -3292,10 +3398,37 @@ SPA_HTML = """<!DOCTYPE html>
 
     function renderPendientesTable() {
         if (!auditData) return;
+        refreshUnusedOptionsAcrossPendientes();
         updatePendReviewCounters();
         var q = document.getElementById("searchPend").value.toLowerCase();
         var tb = document.getElementById("tbodyTab5");
         tb.innerHTML = "";
+
+        // Detectar si en meses ya guardados antes quedó alguna factura marcada repetida en 2 o más filas
+        var usedAllMap = getUsedOptionsMap(-1);
+        var dupEntries = [];
+        Object.keys(usedAllMap).forEach(function(k) {
+            if (usedAllMap[k].length > 1) {
+                dupEntries.push({ key: k, rows: usedAllMap[k] });
+            }
+        });
+        var dupBanner = document.getElementById("dupWarningBanner");
+        if (dupBanner) {
+            if (dupEntries.length > 0) {
+                var dupListHtml = dupEntries.map(function(d) {
+                    var r0 = d.rows[0];
+                    var fechasStr = d.rows.map(function(r){ return r.fecha + " (" + formatMoney(r.valor) + ")"; }).join(" | ");
+                    return "<li><b>" + escapeHtmlAttr(r0.doc) + " — " + escapeHtmlAttr(r0.tercero) + "</b> repetida en <b>" + d.rows.length + " filas</b>: " + fechasStr + "</li>";
+                }).join("");
+                dupBanner.style.display = "block";
+                dupBanner.innerHTML = "<b>🚨 ¡Atención! Detectamos " + dupEntries.length + " factura(s) que ya habías seleccionado repetidas en varias filas (antes de activar el bloqueo):</b>" +
+                    "<ul style='margin:5px 0 0 18px; padding:0;'>" + dupListHtml + "</ul>" +
+                    "<div style='margin-top:5px; font-size:11.5px; color:#7B241C;'>👉 Busca las filas marcadas con <b>🚨 REPETIDA</b> abajo y dale <b>↩️ Desmarcar</b> a las que no correspondan. De aquí en adelante el sistema bloquea automáticamente cada factura apenas la valides.</div>";
+            } else {
+                dupBanner.style.display = "none";
+                dupBanner.innerHTML = "";
+            }
+        }
 
         auditData.partidas_pendientes.forEach(function(p, pIdx){
             if (typeof p.active_opt_idx === 'undefined') {
@@ -3316,7 +3449,14 @@ SPA_HTML = """<!DOCTYPE html>
 
             var statusPill = "";
             if (p.estado_revision === 'CRUZADA_OPCION') {
-                statusPill = "<span style='background:#1E8449; color:white; padding:3px 9px; border-radius:12px; font-size:10.5px; font-weight:700; margin-left:6px;'>✅ YA CRUZADA / VALIDADA</span>";
+                var curConfOp = (p.active_opt_idx >= 0 && p.active_opt_idx < opts.length) ? opts[p.active_opt_idx] : null;
+                var curConfKey = getOptionDocKey(curConfOp);
+                var isDupRow = curConfKey && usedAllMap[curConfKey] && usedAllMap[curConfKey].length > 1;
+                if (isDupRow) {
+                    statusPill = "<span style='background:#C0392B; color:white; padding:3px 9px; border-radius:12px; font-size:10.5px; font-weight:700; margin-left:6px;'>🚨 REPETIDA EN " + usedAllMap[curConfKey].length + " FILAS</span>";
+                } else {
+                    statusPill = "<span style='background:#1E8449; color:white; padding:3px 9px; border-radius:12px; font-size:10.5px; font-weight:700; margin-left:6px;'>✅ YA CRUZADA / VALIDADA</span>";
+                }
             } else if (p.estado_revision === 'ANTICIPO_5PASOS') {
                 statusPill = "<span style='background:#D68910; color:white; padding:3px 9px; border-radius:12px; font-size:10.5px; font-weight:700; margin-left:6px;'>📌 EN ANTICIPO / 5 PASOS</span>";
             } else if (p.estado_revision === 'MANUAL_REF') {
@@ -3399,10 +3539,13 @@ SPA_HTML = """<!DOCTYPE html>
             simHtml += "<button type='button' onclick='setAnticipoPend(" + pIdx + ")' style='background:#D68910; color:white; border:none; padding:6px 10px; border-radius:4px; font-size:11px; font-weight:700; cursor:pointer;'>📌 Mandar a Anticipo / 5 Pasos (Pintar Amarillo)</button>";
             var btnManLabel = (p.estado_revision === 'MANUAL_REF') ? "✏️ Editar cómo se lleva" : "✍️ Escribir cómo se va a llevar";
             simHtml += "<button type='button' onclick='toggleManualRefEditor(" + pIdx + ")' style='background:#1F618D; color:white; border:none; padding:6px 10px; border-radius:4px; font-size:11px; font-weight:700; cursor:pointer;'>" + btnManLabel + "</button>";
-            if (opts.length > 0) {
-                var btnNextLbl = (p.active_opt_idx === -1)
-                    ? ("🔍 Ver opciones cercanas (" + opts.length + ")")
-                    : ("🔄 Otra opción (" + ((p.active_opt_idx + 1) % (opts.length + 1) === opts.length ? "Ir a Anticipo" : ((p.active_opt_idx + 2) + "/" + opts.length)) + ")");
+            var usedForRow = getUsedOptionsMap(pIdx);
+            var availForRow = getAvailableOptionIndices(p, pIdx, usedForRow);
+            if (availForRow.length > 0) {
+                var curAvailPos = availForRow.indexOf(p.active_opt_idx);
+                var btnNextLbl = (p.active_opt_idx === -1 || curAvailPos === -1)
+                    ? ("🔍 Ver opciones libres (" + availForRow.length + ")")
+                    : ("🔄 Otra opción libre (" + (curAvailPos + 1 >= availForRow.length ? "Ir a Anticipo" : ((curAvailPos + 2) + "/" + availForRow.length)) + ")");
                 simHtml += "<button type='button' onclick='nextOptionPend(" + pIdx + ")' style='background:#1B365D; color:white; border:none; padding:6px 10px; border-radius:4px; font-size:11px; font-weight:600; cursor:pointer;'>" + btnNextLbl + "</button>";
             }
             if (p.estado_revision !== 'SIN_REVISAR') {
